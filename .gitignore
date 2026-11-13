@@ -1,0 +1,69 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+.venv/
+env/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Database / uploads
+*.db
+*.sqlite
+*.sqlite3
+uploads/
+
+# Model artifacts (keep app/models Python source)
+*.pkl
+*.joblib
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env.*
+!.env.example
+!.env.*.example
+
+# Secrets and runtime data
+/mosquitto/passwords
+credentials.json
+*service-account*.json
+*service_account*.json
+*-firebase-adminsdk-*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.db-*
+*.sqlite-*
+*.sqlite3-*
+*.dump
+*.sql.gz
+backups/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# AGENTS.md, CLAUDE.md, agent configuration and memory are intentionally included.
+
+# RQ
+*.rdb

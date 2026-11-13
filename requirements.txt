@@ -1,0 +1,54 @@
+# Core — Python 3.14 compatible
+fastapi==0.118.0
+uvicorn[standard]==0.32.0
+pydantic==2.13.5
+pydantic-settings==2.7.1
+
+# Database
+sqlalchemy==2.0.35
+greenlet>=3.0.0  # required by sqlalchemy[asyncio] engine.begin()
+asyncpg>=0.30.0
+psycopg2-binary>=2.9.13
+aiosqlite>=0.20.0
+
+# Auth
+python-jose[cryptography]==3.3.0
+# Round 26 (P2) audit: python-jose 3.3.0 has been unmaintained since 2022.
+# Known CVE-2024-33663 (algorithm confusion) is mitigated here because
+# we use HS256 only (no RS/ES key switch), but the project is
+# effectively in maintenance limbo. Plan migration to PyJWT when
+# convenient. The blocked migration points are:
+#   - jose.jwt.encode/decode → jwt.encode/decode (drop-in)
+#   - jose.jwt.get_unverified_header → jwt.get_unverified_header
+#   - jose.ExpiredSignatureError / JWTError → jwt.ExpiredSignatureError / InvalidTokenError
+bcrypt==4.0.1
+
+# Redis Queue
+redis==5.2.1
+rq==2.0.0
+fakeredis>=2.26.0  # for dev/test fallback when redis not available
+
+# ML
+numpy>=2.1.0
+scikit-learn>=1.6.0
+pandas>=2.2.0
+
+# HTTP client
+httpx==0.28.1
+
+# MQTT
+paho-mqtt>=2.1.0
+
+# Utils
+slowapi==0.1.9
+# Transitive: required by pydantic-settings (auto-loads .env files at runtime)
+python-dotenv>=1.0.0
+
+# Round 27 — Firebase Cloud Messaging (FCM) admin SDK
+# The import is lazy (inside init_fcm) so a missing package does not break
+# the app at startup; only send_fcm_notification() calls fail. With
+# google-cloud-firestore in the dep tree, this also pulls in grpc + a
+# few Google protobuf packages. The library is heavy (~10MB) but the
+# FCM free tier (unlimited notifications) makes the cost worth it for
+# the OS-level push benefit.
+firebase-admin>=6.5.0
