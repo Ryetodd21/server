@@ -315,11 +315,13 @@ async def login(
 
 @router.post("/refresh", response_model=TokenResponse)
 @limiter.limit("3/minute")
-async def refresh(request: Request, req: RefreshRequest, db: AsyncSession = Depends(get_db)):
+async def refresh(request: Request, req: RefreshRequest | None = None, db: AsyncSession = Depends(get_db)):
     # Read refresh token from cookie (HttpOnly, set by login) — avoids
     # requiring the client to send it in the request body. The body is still
     # accepted for backwards compatibility with any client that sends it.
-    refresh_token = request.cookies.get(REFRESH_COOKIE) or req.refresh_token
+    refresh_token = request.cookies.get(REFRESH_COOKIE) or (req.refresh_token if req else None)
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Refresh token required")
     # Round 29 audit P1: pass expected_type="refresh" — decode_token now
     # rejects access tokens here (the previous code had its own type check
     # but at the wrong layer; let decode_token be the single source of truth).

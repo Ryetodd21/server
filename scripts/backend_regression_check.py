@@ -72,6 +72,43 @@ async def add_token(user_id, value):
         await db.commit()
 
 
+async def check_refresh_request():
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    app = FastAPI()
+    app.include_router(auth.router)
+
+    async def test_db():
+        async with sessions() as db:
+            yield db
+
+    app.dependency_overrides[auth.get_db] = test_db
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test.invalid") as client:
+        with patch.object(auth.limiter, "enabled", False):
+            for body in (None, {}):
+                result = await client.post("/auth/refresh", json=body)
+                assert result.status_code == 401, result.text
+            token = auth.create_refresh_token({"sub": "user-one"})
+            await add_token("user-one", token)
+            for cookie in (True, False):
+                client.cookies.clear()
+                if cookie:
+                    client.cookies.set(auth.REFRESH_COOKIE, token)
+                result = await client.post("/auth/refresh", **({} if cookie else {"json": {"refresh_token": token}}))
+                assert result.status_code == 200, result.text
+                assert auth.decode_token(result.json()["access_token"])["sub"] == "user-one"
+                assert "HttpOnly" in result.headers["set-cookie"]
+                token = result.json()["refresh_token"]
+            client.cookies.clear()
+            result = await client.post("/auth/refresh", json={"refresh_token": "invalid"})
+            assert result.status_code == 401, result.text
+    async with sessions() as db:
+        await db.delete((await db.execute(select(Token).where(Token.token == token))).scalar_one())
+        await db.commit()
+    print("PASS refresh cookie without body, mobile JSON body, missing/invalid sessions")
+
+
 async def check_passwords_and_authorization():
     await add_token("user-one", "old-session")
     async with sessions() as db:
@@ -402,6 +439,7 @@ async def run_checks():
             db.add(Student(id=f"student-{suffix}", user_id=f"user-{suffix}", nim=f"test-{suffix}", full_name="Test User"))
         await db.commit()
     try:
+        await check_refresh_request()
         await check_passwords_and_authorization()
         await check_batch()
         await check_two_classes()

@@ -37,7 +37,7 @@ Backend adalah sumber otorisasi, data akademik, log mahasiswa, model distraksi, 
 ## Autentikasi dan hak akses
 
 1. `POST /api/auth/login` memverifikasi pengguna aktif, password, dan metadata perangkat; menghasilkan access/refresh token. Web menerima cookie, Android memakai token body untuk Authorization.
-2. `POST /api/auth/refresh` menangani pembaruan token. Default access 30 menit, refresh 7 hari; baca `config.py` dan `auth.py` untuk aturan efektif.
+2. `POST /api/auth/refresh` menangani pembaruan token. Body opsional untuk browser yang mengirim cookie HttpOnly; JSON `refresh_token` tetap diterima untuk Android. Token kosong ditolak 401. Perbaikan body wajib penyebab 422 sudah deploy 2026-11-14; regresi SQLite lokal dan image production lulus, probe sesi kosong menghasilkan 401. Default access 30 menit, refresh 7 hari; baca `config.py` dan `auth.py` untuk aturan efektif.
 3. `GET /api/auth/me` memberikan identitas/claims; `GET/PUT /api/users/me` adalah profil pengguna. Jangan menganggap kedua bentuk response sama.
 4. Logout dan pengelolaan perangkat berada di `auth.py`; perubahan revocation harus diperiksa pada decoder, Token, LoginDevice dan kedua client, bukan hanya penghapusan cookie.
 5. `POST /api/users/register` menerima `mahasiswa` atau `dosen` dengan `is_active=False` tanpa mempercayai field aktivasi dari client. Role publik lainnya, termasuk admin, ditolak 422. Admin menyetujui melalui `PUT /api/users/{id}`; akun pending ditolak saat login/akses API.
