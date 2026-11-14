@@ -11,8 +11,59 @@ from app.schemas.schedule import (
     ScheduleDirectory, SubjectResponse, LecturerResponse,
 )
 from app.routers.auth import get_current_user, get_current_user_id
+from uuid import UUID, uuid5
 
 router = APIRouter(prefix="/schedules", tags=["Schedules"])
+
+
+def master_schedule_id(student_id: str, slot_id: str) -> str:
+    return str(uuid5(UUID(student_id), slot_id))
+
+
+async def sync_master_schedules(db: AsyncSession, student: Student):
+    from app.models.jadwal_mata_kuliah import JadwalMataKuliah
+    from app.models.mata_kuliah import MataKuliah
+    from app.models.program_studi import ProgramStudi
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+    # UUIDv5 keeps one stable schedule per student/slot, including concurrent fetches.
+    # Existing UUIDv4 personal schedules and historical log references are retained.
+    slot_ids = (await db.execute(select(JadwalMataKuliah.__table__.c.id))).scalars().all()
+    managed_ids = {master_schedule_id(student.id, sid) for sid in slot_ids}
+    existing = (await db.execute(select(Schedule).where(Schedule.student_id == student.id))).scalars().all()
+    manual_keys = {(s.subject_id, s.day_of_week, s.start_time, s.end_time)
+                   for s in existing if s.id not in managed_ids and s.is_active}
+    rows = (await db.execute(
+        select(JadwalMataKuliah, MataKuliah, Subject.id, User.full_name)
+        .join(MataKuliah, JadwalMataKuliah.mata_kuliah_id == MataKuliah.id)
+        .join(ProgramStudi, MataKuliah.program_studi_id == ProgramStudi.id)
+        .outerjoin(Subject, Subject.code == MataKuliah.code)
+        .outerjoin(User, MataKuliah.dosen_id == User.id)
+        .where(ProgramStudi.is_active.is_(True),
+               (ProgramStudi.name == student.program_studi) | (ProgramStudi.code == student.program_studi)
+               | (ProgramStudi.id == student.program_studi),
+               MataKuliah.is_active.is_(True), JadwalMataKuliah.is_active.is_(True))
+    )).all()
+    active_ids = set()
+    insert = pg_insert if db.bind.dialect.name == "postgresql" else sqlite_insert
+    for slot, course, subject_id, lecturer_name in rows:
+        day = slot.day_of_week or 7  # Master: Sunday=0; Android/personal: Sunday=7.
+        start, end = slot.start_time.strftime("%H:%M"), slot.end_time.strftime("%H:%M")
+        if (subject_id, day, start, end) in manual_keys:
+            continue
+        schedule_id = master_schedule_id(student.id, slot.id)
+        active_ids.add(schedule_id)
+        values = dict(student_id=student.id, subject_id=subject_id, subject_name_raw=course.name,
+                      lecturer_name_raw=lecturer_name, day_of_week=day, start_time=start, end_time=end,
+                      campus_id=course.campus_id, room=slot.room, is_active=True)
+        stmt = insert(Schedule).values(id=schedule_id, **values)
+        await db.execute(stmt.on_conflict_do_update(index_elements=["id"], set_=values))
+    for schedule in existing:
+        if schedule.id in managed_ids and schedule.id not in active_ids:
+            schedule.is_active = False
+    await db.commit()
+    db.expire_all()
 
 
 async def _get_or_provision_student(db: AsyncSession, user_id: str) -> Student | None:
@@ -91,6 +142,9 @@ async def get_schedules(
     if not student:
         return []
 
+    student_id = student.id
+    await sync_master_schedules(db, student)
+
     result = await db.execute(
         select(Schedule)
         .options(
@@ -98,7 +152,7 @@ async def get_schedules(
             selectinload(Schedule.lecturer),
             selectinload(Schedule.campus),
         )
-        .where(Schedule.student_id == student.id, Schedule.is_active == True)
+        .where(Schedule.student_id == student_id, Schedule.is_active == True)
         .order_by(Schedule.day_of_week, Schedule.start_time)
     )
     schedules = result.scalars().all()
@@ -139,6 +193,8 @@ async def update_schedule(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    if UUID(schedule_id).version == 5:
+        raise HTTPException(403, "Jadwal prodi dikelola melalui menu Akademik")
     student = await _get_or_provision_student(db, user_id)
     if not student:
         raise HTTPException(status_code=404, detail="User not found")
@@ -169,6 +225,12 @@ async def delete_schedule(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    try:
+        managed = UUID(schedule_id).version == 5
+    except ValueError:
+        raise HTTPException(404, "Schedule not found")
+    if managed:
+        raise HTTPException(403, "Jadwal prodi dikelola melalui menu Akademik")
     student = await _get_or_provision_student(db, user_id)
     if not student:
         raise HTTPException(status_code=404, detail="User not found")

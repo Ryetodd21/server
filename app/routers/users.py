@@ -65,6 +65,9 @@ async def update_my_profile(
 ):
     """User edit profilenya sendiri."""
     update_data = {k: v for k, v in data.model_dump().items() if v is not None}
+    current = await db.get(User, user_id)
+    if current and current.role == "dosen" and "jurusan" in update_data and update_data["jurusan"] != current.jurusan:
+        raise HTTPException(403, "Perubahan afiliasi dosen hanya dapat dilakukan admin")
     if not update_data:
         raise HTTPException(status_code=400, detail="Tidak ada field yang diubah")
 

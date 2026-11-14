@@ -63,6 +63,9 @@ async def list_students(
     cluster_labels_map = {}
     if active_model:
         cluster_distribution = _parse_json_field(active_model.cluster_distribution, {})
+        if "academic_scope" in db.sync_session.info:
+            from app.academic_scope import scoped_distribution
+            cluster_distribution = await scoped_distribution(db, active_model.id)
         cluster_labels_map = _parse_json_field(active_model.cluster_labels, {})
 
     # Map student_id -> latest cluster info (must run BEFORE filter so we

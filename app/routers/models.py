@@ -119,7 +119,12 @@ async def get_model_history(
         select(ModelVersion).order_by(ModelVersion.version_number.desc())
     )
     versions = result.scalars().all()
-    return [_to_response(v) for v in versions]
+    responses = [_to_response(v) for v in versions]
+    if "academic_scope" in db.sync_session.info:
+        from app.academic_scope import scoped_distribution
+        for response in responses:
+            response.cluster_distribution = await scoped_distribution(db, response.id)
+    return responses
 
 
 @router.get("/config")
@@ -669,6 +674,8 @@ async def predict_student(
     from app.database import get_sync_engine
     from sqlalchemy.orm import Session as SyncSession
 
+    if not (await db.execute(select(Student.id).where(Student.id == data.student_id))).scalar_one_or_none():
+        raise HTTPException(404, "Mahasiswa tidak ditemukan")
     target = _resolve_target_date(data.target_date)
     engine = get_sync_engine()
     with SyncSession(engine) as s:
@@ -740,6 +747,9 @@ async def predict_students_batch(
         upsert_cluster_result_sync,
     )
 
+    visible = set((await db.execute(select(Student.id).where(Student.id.in_(data.student_ids)))).scalars())
+    if set(data.student_ids) - visible:
+        raise HTTPException(404, "Mahasiswa tidak ditemukan")
     target = _resolve_target_date(data.target_date)
     results: list[PredictResponse] = []
     skipped: list[dict] = []

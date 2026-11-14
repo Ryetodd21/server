@@ -530,7 +530,8 @@ async def get_dashboard_summary(
     refreshes-per-minute into 1 query. The TTL is short enough that admin
     "Lihat Sekarang" actions still feel responsive.
     """
-    cached = cache_get("reports:summary", 30.0)
+    scoped = "academic_scope" in db.sync_session.info
+    cached = None if scoped else cache_get("reports:summary", 30.0)
     if cached is not None:
         return cached
     from app.models.student import Student
@@ -642,5 +643,6 @@ async def get_dashboard_summary(
         "avg_game_time_today_min": round(float(avg_game_today), 1),
         "date": str(today),
     }
-    cache_set("reports:summary", response, 30.0)
+    if not scoped:
+        cache_set("reports:summary", response, 30.0)
     return response

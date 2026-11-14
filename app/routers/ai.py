@@ -270,6 +270,9 @@ async def _build_cluster_context(db: AsyncSession) -> dict:
 
     if active_model:
         dist = _parse_json(active_model.cluster_distribution, {})
+        if "academic_scope" in db.sync_session.info:
+            from app.academic_scope import scoped_distribution
+            dist = await scoped_distribution(db, active_model.id)
         lbls = _parse_json(active_model.cluster_labels, {})
         model_info = {
             "v": active_model.version_number,

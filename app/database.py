@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, text, select, func
 from sqlalchemy.types import DateTime, TypeDecorator
 import sqlalchemy
 from app.config import get_settings
+from fastapi import Request
 
 settings = get_settings()
 logger = logging.getLogger("monitor")
@@ -114,9 +115,11 @@ class Base(DeclarativeBase):
     pass
 
 
-async def get_db() -> AsyncSession:
+async def get_db(request: Request) -> AsyncSession:
     async with async_session() as session:
         try:
+            from app.academic_scope import configure_request_scope
+            await configure_request_scope(session, request)
             yield session
         finally:
             await session.close()
