@@ -136,6 +136,16 @@ Pemeriksaan yang tersedia:
 - `scripts/smoke_test.py` lama menggunakan kontrak login `username` dan menulis batch; jangan jalankan terhadap data aktif atau anggap kompatibel tanpa pembaruan.
 - Untuk kontrak baru, tambah satu regression check terfokus pada input, otorisasi, dedup, waktu atau agregasi yang berubah. Perubahan DB memerlukan pemeriksaan SQLite dan PostgreSQL bila memakai fitur spesifik dialek.
 
+## PostgreSQL VPS 2026-11-14
+
+Production VPS `213.163.207.199` memakai PostgreSQL **18.7** (`postgres:18.7-alpine`), override `/opt/monitorung/compose.vps.yml`; compose dasar/lokal tetap 16. Migrasi logical dump/restore ke volume `monitorung-postgres18-data` dengan PGDATA `/var/lib/postgresql/18/docker`. Regresi backend pada DB PostgreSQL 18 disposable lulus; fingerprint seluruh tabel/sequence cocok setelah restore final, ANALYZE dan koneksi asyncpg/psycopg2 lulus. Delapan layanan healthy. Backup serta konfigurasi sebelumnya tersimpan privat di `/opt/monitorung/releases/postgres18/`, volume PostgreSQL 16 dipertahankan. Rollback setelah ada penulisan baru membutuhkan rekonsiliasi agar tidak kehilangan data.
+
+## Managed PostgreSQL UpCloud 2026-11-14
+
+Status production terbaru menggantikan database container VPS: **UpCloud PostgreSQL 18.7**, database `defaultdb`, melalui private network. `/opt/monitorung/.env.production` menyimpan `UPCLOUD_DATABASE_URL` dan `UPCLOUD_DATABASE_SYNC_URL`; Compose override menerapkannya pada API/worker/scheduler/subscriber dengan `PGSSLMODE=require`. URL tanpa parameter query SSL menjaga kompatibilitas asyncpg dan helper `get_sync_engine()` yang menurunkan URL dari async; kedua driver terbukti menggunakan TLS di keempat proses. TLS require mengenkripsi, belum validasi CA/hostname verify-full.
+
+Regresi backend pada DB disposable UpCloud lulus. Dump final setelah penghentian writer, restore, fingerprint seluruh tabel/sequence dan ANALYZE lulus. Container postgres lokal berhenti, profile `local-db-rollback`; volume dan backup privat `/opt/monitorung/releases/upcloud/` dipertahankan. Jangan rollback ke data lokal lama setelah ada penulisan di UpCloud tanpa sinkronisasi balik. Website/API 200 dan auth tanpa sesi 401; login nyata dan training telah diuji pengguna (konfirmasi 2026-11-14; bukan pengujian ulang oleh agen). Kredensial yang pernah masuk chat harus dirotasi di penyedia lalu URL runtime diperbarui, tanpa menyalin secret ke memory/log.
+
 ## Batas dan pemeliharaan memory
 
 Sumber utama: file pada tabel kepemilikan, `requirements.txt`, `Dockerfile`, `../docker-compose.yml`. `README.md`, `DEPLOYMENT.md`, dan `CLAUDE.md` membantu konteks historis tetapi memuat detail usang. Memory ini tidak menyatakan API, broker, DB, worker, training atau AI sudah diuji berjalan. Perbarui bagian terkait setiap kali kontrak, role, versi, agregasi atau alur berubah.
