@@ -15,6 +15,10 @@ from app.models.user import User
 from app.routers.auth import get_current_user, get_token_from_request
 from app.config import get_settings
 
+# One shared pool for the broker probe. A per-request executor leaked a thread
+# (and its shutdown) on every dashboard status poll.
+_mqtt_probe_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mqtt-probe")
+
 router = APIRouter(prefix="/status", tags=["Status"])
 
 settings = get_settings()
@@ -29,21 +33,61 @@ async def get_system_status(
     Get overall system status.
     Returns service health, active users, broker info.
     """
-    # Service status
+    # Resolve the caller BEFORE probing anything. The landing page and
+    # useVersion() hit this endpoint anonymously on every visit just to read
+    # `server.version`, and they only ever receive `public_status`. Running the
+    # DB counts, Redis ping and MQTT TCP probe first (then discarding them) cost
+    # anon callers a full round of I/O for a response they never see.
+    current_user = None
+    is_staff = False
+    if request is not None:
+        raw_token = get_token_from_request(request)
+        if raw_token:
+            try:
+                payload = await get_current_user(request)
+                is_staff = payload.get("role") in ("admin", "dosen")
+                user_id = payload.get("sub")
+                if user_id:
+                    result = await db.execute(select(User).where(User.id == user_id))
+                    user = result.scalar_one_or_none()
+                    if user:
+                        current_user = {
+                            "id": user.id,
+                            "username": user.username,
+                            "email": user.email,
+                            "full_name": user.full_name or "",
+                            "role": user.role,
+                            "is_active": user.is_active,
+                        }
+            except Exception:
+                pass
+
     server_status = "running"
     server_time = datetime.now(timezone.utc).isoformat()
     server_version = settings.APP_VERSION
+    public_status = {
+        "server": {
+            "status": server_status,
+            "version": server_version,
+            "time": server_time,
+        },
+    }
+    if not is_staff:
+        return public_status
 
     # Database status — NEVER echo raw DB errors to clients. The /api/status
     # endpoint is unauthenticated, so a DB error message would be a public
     # reconnaissance oracle. Log internally; return only the health state.
     db_status = "unknown"
     db_response_ms = None
+    total_users = 0
     try:
         import time
         start = time.time()
+        # This single COUNT also serves as the DB health probe — it used to be
+        # issued twice, back to back, for the same value.
         result = await db.execute(select(func.count()).select_from(User))
-        count = result.scalar() or 0
+        total_users = result.scalar() or 0
         db_response_ms = round((time.time() - start) * 1000, 2)
         db_status = "healthy"
     except Exception as e:
@@ -53,11 +97,7 @@ async def get_system_status(
     # Active users: count users with last_login within the last 24 hours
     # (access tokens are stateless JWTs and are NOT stored in the Token table)
     active_users_count = 0
-    total_users = 0
     try:
-        result = await db.execute(select(func.count()).select_from(User))
-        total_users = result.scalar() or 0
-
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(hours=24)
         active_result = await db.execute(
@@ -113,60 +153,24 @@ async def get_system_status(
     mqtt_broker = settings.MQTT_BROKER_URL
     mqtt_connected = False
     try:
-        import paho.mqtt.client as mqtt
-
         def _mqtt_probe():
-            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
-                                 protocol=mqtt.MQTTv311)
+            # Plain TCP connect on the broker port, matching what this check
+            # claims to do. The previous paho handshake called
+            # socket.setdefaulttimeout(2), which mutated the timeout of every
+            # socket in the process for the rest of its life, and built a fresh
+            # ThreadPoolExecutor per request.
+            import socket
             host = mqtt_broker.replace("tcp://", "").split(":")[0]
             port = int(mqtt_broker.split(":")[-1]) if ":" in mqtt_broker else 1883
-            # paho 2.x: connect() is sync; use socket_connect timeout via socket default
-            import socket
-            socket.setdefaulttimeout(2)
-            client.connect(host, port, keepalive=10)
-            client.disconnect()
+            with socket.create_connection((host, port), timeout=2):
+                return True
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(ThreadPoolExecutor(max_workers=1), _mqtt_probe)
+        await loop.run_in_executor(_mqtt_probe_pool, _mqtt_probe)
         mqtt_status = "connected"
         mqtt_connected = True
     except Exception:
         mqtt_status = "unavailable"
-
-    # Current user (if token provided via cookie or header)
-    current_user = None
-    is_staff = False
-    if request is not None:
-        raw_token = get_token_from_request(request)
-        if raw_token:
-            try:
-                payload = await get_current_user(request)
-                is_staff = payload.get("role") in ("admin", "dosen")
-                user_id = payload.get("sub")
-                if user_id:
-                    result = await db.execute(select(User).where(User.id == user_id))
-                    user = result.scalar_one_or_none()
-                    if user:
-                        current_user = {
-                            "id": user.id,
-                            "username": user.username,
-                            "email": user.email,
-                            "full_name": user.full_name or "",
-                            "role": user.role,
-                            "is_active": user.is_active,
-                        }
-            except Exception:
-                pass
-
-    public_status = {
-        "server": {
-            "status": server_status,
-            "version": server_version,
-            "time": server_time,
-        },
-    }
-    if not is_staff:
-        return public_status
 
     return {
         **public_status,

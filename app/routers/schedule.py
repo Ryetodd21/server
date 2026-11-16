@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, func, or_
+from sqlalchemy import select, delete, func, or_, update
 from sqlalchemy.orm import selectinload
 from app.database import get_db
 from app.models.schedule import Schedule, Subject, Lecturer
@@ -78,6 +78,9 @@ async def sync_master_schedules(db: AsyncSession, student: Student):
     )).all()
     active_ids = set()
     insert = pg_insert if db.bind.dialect.name == "postgresql" else sqlite_insert
+    # Build every row first, then UPSERT once. The per-row execute() loop issued
+    # one round-trip per schedule slot (48 queries for one student on prod).
+    batch: list[dict] = []
     for slot, course, subject_id, lecturer_name in rows:
         day = slot.day_of_week or 7  # Master: Sunday=0; Android/personal: Sunday=7.
         start, end = slot.start_time.strftime("%H:%M"), slot.end_time.strftime("%H:%M")
@@ -85,14 +88,32 @@ async def sync_master_schedules(db: AsyncSession, student: Student):
             continue
         schedule_id = master_schedule_id(student.id, slot.id)
         active_ids.add(schedule_id)
-        values = dict(student_id=student.id, subject_id=subject_id, subject_name_raw=course.name,
-                      lecturer_name_raw=lecturer_name, day_of_week=day, start_time=start, end_time=end,
-                      campus_id=course.campus_id, room=slot.room, is_active=True)
-        stmt = insert(Schedule).values(id=schedule_id, **values)
-        await db.execute(stmt.on_conflict_do_update(index_elements=["id"], set_=values))
-    for schedule in existing:
-        if schedule.id in managed_ids and schedule.id not in active_ids:
-            schedule.is_active = False
+        batch.append(dict(id=schedule_id, student_id=student.id, subject_id=subject_id,
+                          subject_name_raw=course.name, lecturer_name_raw=lecturer_name,
+                          day_of_week=day, start_time=start, end_time=end,
+                          campus_id=course.campus_id, room=slot.room, is_active=True))
+    # Only write what actually changed. This runs on every schedule read, and
+    # the DB is remote (~1.5ms/round-trip), so an unconditional UPSERT paid a
+    # write round-trip (plus WAL churn) on every GET.
+    current = {s.id: s for s in existing}
+    changed = [v for v in batch
+               if (c := current.get(v["id"])) is None
+               or (c.subject_id, c.subject_name_raw, c.lecturer_name_raw, c.day_of_week,
+                   c.start_time, c.end_time, c.campus_id, c.room, c.is_active)
+              != (v["subject_id"], v["subject_name_raw"], v["lecturer_name_raw"], v["day_of_week"],
+                  v["start_time"], v["end_time"], v["campus_id"], v["room"], v["is_active"])]
+    stale_ids = [s.id for s in existing
+                 if s.id in managed_ids and s.id not in active_ids and s.is_active]
+    if not changed and not stale_ids:
+        return
+    if changed:
+        stmt = insert(Schedule).values(changed)
+        await db.execute(stmt.on_conflict_do_update(
+            index_elements=["id"],
+            set_={c: stmt.excluded[c] for c in changed[0] if c != "id"},
+        ))
+    if stale_ids:
+        await db.execute(update(Schedule).where(Schedule.id.in_(stale_ids)).values(is_active=False))
     await db.commit()
     db.expire_all()
 

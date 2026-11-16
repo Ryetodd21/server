@@ -143,6 +143,8 @@ async def configure_request_scope(db, request):
     if not token:
         return  # Public directories; protected routes still enforce authentication.
     payload = await authenticate_access_token(token)
+    # Share with get_current_user() so the route doesn't authenticate again.
+    request.state.auth_payload = payload
     jurusan_id = request.query_params.get("jurusan_id") or request.headers.get("x-jurusan-id")
     program_id = request.query_params.get("program_studi_id") or request.headers.get("x-program-studi-id")
     # Filters narrow reads only; role restrictions apply to mutations too.

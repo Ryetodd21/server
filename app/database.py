@@ -438,6 +438,15 @@ _INDEX_DEFINITIONS: list[tuple[str, str, str]] = [
     # Round 15: program_studi.jurusan_id backs the cascade dropdown filter
     # ("list all prodi under this jurusan") on /register and /akademik.
     ("program_studi", "jurusan_id", "idx_program_studi_jurusan_id"),
+    # Ingest hot paths. POST /api/logs/batch looks up existing rows by
+    # idempotency_key on every sync (logs.py:156 and :525) and location_logs had
+    # no index at all, so each batch degraded to a seq scan as the table grew.
+    ("location_logs", "idempotency_key", "idx_location_logs_idempotency_key"),
+    ("location_logs", "student_id, timestamp", "idx_location_logs_student_timestamp"),
+    ("app_logs", "idempotency_key", "idx_app_logs_idempotency_key"),
+    # reports/* filters cluster_results by (model_version_id, result_date) and
+    # orders by result_date; the two separate indexes can't serve both.
+    ("cluster_results", "model_version_id, result_date", "idx_cluster_results_model_date"),
 ]
 
 

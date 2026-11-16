@@ -167,3 +167,13 @@ Sumber utama: file pada tabel kepemilikan, `requirements.txt`, `Dockerfile`, `..
 ## Perbaikan jadwal/mata kuliah kosong untuk mahasiswa (2026-11-16)
 
 `students.program_studi` adalah teks bebas yang bisa basi (`"Weerr"`, kosong), sehingga `sync_master_schedules()` dan `resolve_programs()` role mahasiswa menghasilkan daftar kosong walau admin sudah membuat mata kuliah dan jadwal. Keduanya sekarang mencoba nilai itu lebih dulu lalu jatuh ke `users.jurusan` bila tidak cocok dengan prodi aktif mana pun; `academic_scope` memakai pencocokan yang sama untuk scope baca. Cek: skrip SQLite lokal berasert (prodi basi + jurusan `PTI`/`Sistem Informasi`) lulus, `py_compile` lulus. Belum dideploy; image VPS masih memuat kode lama.
+
+## Optimasi performa 2026-11-16
+
+Diukur di VPS: DB UpCloud remote, ~1,5ms per round-trip, jadi jumlah query per request lebih menentukan daripada CPU. `GET /api/schedules` tadinya 53–48 query/request karena `sync_master_schedules()` melakukan satu UPSERT per slot jadwal dan **menulis setiap kali dibaca**. Sekarang baris dirakit dulu, UPSERT sekali (batch `values(list)` + `on_conflict_do_update`), dan hanya menulis bila ada yang berubah; baris basi dinonaktifkan lewat satu `UPDATE ... WHERE id IN`. Hasil harness in-process (40 slot, auth dihitung): 96,4ms/53 query/2 auth → 18,4ms/12 query/1 auth.
+
+Auth ganda: `get_db()` → `configure_request_scope()` sudah memanggil `authenticate_access_token()`, lalu route memanggil `get_current_user()` lagi. Payload sekarang dibagikan lewat `request.state.auth_payload`. **Jangan** memoize hasil `get_current_user()` sendiri: `backend_regression_check.py` mensimulasikan akun yang dinonaktifkan dengan objek `Request` yang sama dan harus tetap 401; menyimpan hasil di state membuat test itu gagal (sempat terjadi, sudah dikembalikan).
+
+Index baru di `_INDEX_DEFINITIONS` (`database.py`): `location_logs.idempotency_key`, `location_logs(student_id, timestamp)`, `app_logs.idempotency_key`, `cluster_results(model_version_id, result_date)`. Sebelumnya lookup idempotency ingest dan filter laporan melakukan seq scan. Dibuat lewat `run_index_migrations()` saat startup, idempoten.
+
+Cek: 9 cek `backend_regression_check.py` PASS; skrip SQLite berasert untuk sync (tulis awal, no-op tidak menulis, edit master merambat, slot nonaktif menonaktifkan baris) dan auth (akun nonaktif 401, role ikut DB) lulus; `py_compile` lulus. Belum diukur pada trafik nyata, dan index belum ada di production sampai deploy.

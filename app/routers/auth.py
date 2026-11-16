@@ -120,7 +120,17 @@ async def authenticate_access_token(token: str) -> dict:
 
 
 async def get_current_user(request: Request) -> dict:
-    """Dependency: get current user payload from cookie or header."""
+    """Dependency: get current user payload from cookie or header.
+
+    Reuses the payload that get_db() already resolved for the academic scope
+    (configure_request_scope) so a request doesn't decode the JWT and hit
+    `users` twice. It never stores its own result: account state must still be
+    re-read on every fresh call, otherwise a deactivated account would keep
+    passing on a reused Request object.
+    """
+    payload = getattr(request.state, "auth_payload", None)
+    if payload is not None:
+        return payload
     token = get_token_from_request(request)
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
