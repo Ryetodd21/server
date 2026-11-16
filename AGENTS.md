@@ -1,179 +1,143 @@
 # Memory Backend Monitor UNG
 
-Snapshot kode: 2026-11-13. Versi API aktif: 0.29.0. Berlaku untuk `/home/terio-op/server`. Baca juga [memory proyek](../AGENTS.md); pasangan integrasi adalah [website](../website/AGENTS.md) dan [Android](../monitor-ung-app/AGENTS.md).
+Terakhir dicocokkan: 2026-11-17. Berlaku untuk `/home/terio-op/server`. Baca juga [memory proyek](../AGENTS.md); pasangan integrasi [website](../website/AGENTS.md) dan [Android](../monitor-ung-app/AGENTS.md).
 
 ## Peran dan stack
 
-Backend adalah sumber otorisasi, data akademik, log mahasiswa, model distraksi, laporan, dan konteks AI. API memakai prefix `/api`; `/` memberikan metadata aplikasi dan `/health` menyediakan pemeriksaan dasar. Jangan menganggap respons health membuktikan seluruh pipeline MQTT/ML berfungsi.
+Sumber otorisasi, data akademik, log mahasiswa, model distraksi, laporan, dan konteks AI. Prefix `/api`; `/` metadata, `/health` pemeriksaan dasar (tidak membuktikan pipeline MQTT/ML).
 
-- Python: Dockerfile default 3.13; requirements menyatakan kompatibilitas 3.14. Ikuti interpreter environment yang digunakan, jangan menyimpulkan versi dari satu catatan historis.
-- FastAPI 0.118.0, Uvicorn 0.32.0, Pydantic 2.13.5, pydantic-settings 2.7.1.
-- SQLAlchemy 2.0.35: AsyncSession untuk HTTP; Session sync untuk pekerjaan ML/background. PostgreSQL memakai asyncpg/psycopg2, SQLite memakai aiosqlite untuk development.
-- JWT HS256 melalui python-jose, bcrypt; SlowAPI menggunakan limiter bersama di `app/limiter.py`.
-- Redis 5.2.1, RQ 2.0.0, fakeredis untuk mode dev; paho-mqtt 2.1+.
-- pandas, NumPy, scikit-learn untuk StandardScaler/PCA/KMeans; httpx untuk layanan HTTP; Firebase Admin opsional untuk push.
+- Python 3.13 di Dockerfile; requirements menyatakan kompatibel 3.14.
+- FastAPI, Uvicorn, Pydantic 2, pydantic-settings.
+- SQLAlchemy 2: AsyncSession untuk HTTP, Session sync untuk ML/background. PostgreSQL (asyncpg/psycopg2), SQLite (aiosqlite) untuk dev.
+- JWT HS256 (python-jose), bcrypt, SlowAPI (`app/limiter.py`).
+- Redis, RQ 2 (`monitoring` queue), fakeredis untuk dev; paho-mqtt 2.1+.
+- pandas/NumPy/scikit-learn (StandardScaler/PCA/KMeans), httpx, Firebase Admin opsional.
 
 ## Peta kepemilikan kode
 
 | Lokasi | Tanggung jawab |
 | --- | --- |
-| `app/main.py` | FastAPI lifespan, migrasi startup, CORS/Origin, router, proxy MQTT WebSocket `/mqtt`. |
-| `app/config.py` | Settings environment, JWT, koneksi, default ML/skor, jam operasional, pool Groq. |
-| `app/database.py` | Engine async/sync, dependency session, `AwareDateTime`, migrasi lintas PostgreSQL/SQLite. |
-| `app/models/` | Tabel User/Token/LoginDevice, Student, Campus, akademik, Schedule, request, AppLog/LocationLog, ModelVersion/ClusterResult, institusi. |
-| `app/schemas/` | Kontrak request/response dan validasi; jangan menurunkan batas input saat menyelaraskan DTO. |
-| `app/routers/` | Auth, users, students, logs, campus, schedule, schedule_request, models, reports, ai, config, akademik, institution_settings, seed/status. |
-| `app/ml/pipeline.py` | Penyusunan fitur, train/test split, scaling, PCA, clustering dan serialisasi artefak. |
-| `app/ml/serving.py` | Memuat model aktif, agregasi fitur, prediksi, upsert hasil mahasiswa per tanggal. |
+| `app/main.py` | Lifespan, migrasi startup, CORS/Origin, router, proxy MQTT `/mqtt`. |
+| `app/config.py` | Settings env, JWT, koneksi, default ML/skor, jam operasional, pool Groq. |
+| `app/database.py` | Engine async/sync, `get_db`, `AwareDateTime`, migrasi lintas dialek. |
+| `app/academic_scope.py` | Scope akademik per request: `resolve_programs`, `install_scope`, `normalize_academic_name`, `match_program`, `match_department`, `stream_program_ids`. |
+| `app/models/` | User/Token/LoginDevice, Student, Campus, Fakultas/Jurusan/ProgramStudi, MataKuliah/JadwalMataKuliah, Schedule, ScheduleRequest, AppLog/LocationLog, ModelVersion/ClusterResult. |
+| `app/schemas/` | Kontrak request/response dan validasi. Jangan turunkan batas input saat menyelaraskan DTO. |
+| `app/routers/` | auth, users, students, logs, campus, schedule, schedule_request, jadwal_mata_kuliah, mata_kuliah, fakultas, jurusan, program_studi, models, reports, ai, config, institution_settings, status. |
+| `app/ml/pipeline.py` | Fitur, split, scaling, PCA, clustering, serialisasi artefak. |
+| `app/ml/serving.py` | Model aktif, agregasi fitur, prediksi, upsert hasil per tanggal. |
 | `app/ml/score.py` | Rumus skor bersama trainer dan serving. |
-| `app/tasks/worker.py` | RQ queue, cutoff, training terjadwal, persist hasil, invalidasi cache lintas proses. |
-| `app/tasks/_train_lock*.py` | Penguncian training; baca saat mengubah pemicu manual/terjadwal. |
+| `app/tasks/worker.py` | RQ queue, cutoff, training terjadwal, persist, invalidasi cache. |
 | `app/schedules/scheduler.py` | Loop slot cutoff/training; proses terpisah dari Uvicorn. |
-| `app/mqtt_subscriber.py` | Konsumen `students/+/logs` dan `students/+/location`; DB dan publikasi event. |
-| `app/cache.py`, `app/cache_pubsub.py` | Cache API dan invalidasi model antarproses. |
-| `app/services/fcm.py` | Inisialisasi dan pengiriman FCM; konfigurasi service account diperlukan. |
-| `scripts/`, `mosquitto/` | Pemeriksaan/seed dan konfigurasi broker; bukan sumber data untuk disalin ke memory. |
+| `app/mqtt_subscriber.py` | Konsumen `students/+/logs` dan `students/+/location`. |
+| `app/cache.py`, `app/cache_pubsub.py` | Cache API dan invalidasi antarproses. |
+| `app/services/fcm.py` | FCM; butuh service account. |
+| `scripts/` | `backend_regression_check.py`, `scheduler_slot_check.py`, `ml_pipeline_smoke_test.py`, seed. |
 
 ## Autentikasi dan hak akses
 
-1. `POST /api/auth/login` memverifikasi pengguna aktif, password, dan metadata perangkat; menghasilkan access/refresh token. Web menerima cookie, Android memakai token body untuk Authorization.
-2. `POST /api/auth/refresh` menangani pembaruan token. Body opsional untuk browser yang mengirim cookie HttpOnly; JSON `refresh_token` tetap diterima untuk Android. Token kosong ditolak 401. Perbaikan body wajib penyebab 422 sudah deploy 2026-11-14; regresi SQLite lokal dan image production lulus, probe sesi kosong menghasilkan 401. Default access 30 menit, refresh 7 hari; baca `config.py` dan `auth.py` untuk aturan efektif.
-3. `GET /api/auth/me` memberikan identitas/claims; `GET/PUT /api/users/me` adalah profil pengguna. Jangan menganggap kedua bentuk response sama.
-4. Logout dan pengelolaan perangkat berada di `auth.py`; perubahan revocation harus diperiksa pada decoder, Token, LoginDevice dan kedua client, bukan hanya penghapusan cookie.
-5. `POST /api/users/register` menerima `mahasiswa` atau `dosen` dengan `is_active=False` tanpa mempercayai field aktivasi dari client. Role publik lainnya, termasuk admin, ditolak 422. Admin menyetujui melalui `PUT /api/users/{id}`; akun pending ditolak saat login/akses API.
+1. `POST /api/auth/login` memverifikasi user aktif + password + metadata perangkat. Web menerima cookie; Android memakai token di body. Login menerima email, username, atau NIM (fallback join ke `students.nim` setelah email/username gagal).
+2. `POST /api/auth/refresh` body opsional untuk browser (cookie); JSON `refresh_token` untuk Android. Token kosong → 401. Default access 30 menit, refresh 7 hari.
+3. `GET /api/auth/me` = claims; `GET/PUT /api/users/me` = profil. Bentuk response berbeda.
+4. `POST /api/users/register` hanya `mahasiswa`/`dosen`, selalu `is_active=False`; admin menyetujui via `PUT /api/users/{id}`.
+5. `authenticate_access_token()` memeriksa akun aktif dan membaca role terbaru dari DB tiap request. Access token stateless terhadap logout sampai expiry.
 
-`authenticate_access_token()` memeriksa akun aktif dan membaca role/identitas terbaru dari DB pada setiap request. Stream log hanya untuk admin/dosen; validasi diulang sebelum setiap event sehingga perubahan role, penonaktifan akun, dan expiry menghentikan pengiriman berikutnya. Access token tetap stateless terhadap logout/reset password sampai expiry; penghapusan refresh token tidak otomatis mencabut access token.
+`require_admin` / `require_admin_or_dosen` lokal per router (hindari circular import). Staff gate website bukan bukti endpoint boleh ditulis dosen; baca dependency router.
 
-Helper `require_admin` dan `require_admin_or_dosen` umumnya lokal per router. Ikuti pola existing untuk menghindari circular import. Staff gate website bukan bukti semua endpoint dapat ditulis dosen: baca dependency masing-masing operasi, terutama pengguna, institusi dan model. Endpoint mahasiswa harus memperoleh `student_id` dari identitas login, bukan mempercayai ID kiriman client.
+## Scope akademik
 
-Cookie aktif pada `set_auth_cookies`: HttpOnly, Secure, SameSite=None, path `/`; fungsi tidak mengatur Domain. Mutasi HTTP diperiksa terhadap Origin/CORS, WebSocket punya allowlist Origin tersendiri. Jangan menyalin komentar lama yang menyebut SameSite=Lax atau menganggap `DEBUG` otomatis mematikan Secure. Pengiriman cookie ke host relay berbeda harus dibuktikan di browser; SameSite=None sendiri tidak memperluas scope domain cookie.
+`configure_request_scope()` dipanggil dari `get_db()` untuk path di `prefixes` (`/students`, `/reports`, `/models`, `/logs`, `/ai`, `/mata-kuliah`, `/jadwal-mata-kuliah`, `/schedules`, `/schedule-requests`, `/request-akademik`, `/program-studi`, `/jurusan`, `/fakultas`, `/users`).
 
-## Alur ingest HTTP dan MQTT
+- Filter `x-jurusan-id` / `x-program-studi-id` (atau query param) **hanya mempersempit GET/HEAD**.
+- `install_scope()` memasang `with_loader_criteria` per model. `skip_academic_scope` execution option melewati filter untuk query master internal.
+- **Exact match wajib.** `normalize_academic_name()` = casefold + buang non-alfanumerik + rapikan spasi. `match_program()` / `match_department()` hanya membandingkan `id`/`code`/`name` persis. Substring matching pernah membuat kode prodi `SI` cocok ke "Pendidikan Teknologi Informasi" dan membocorkan data antar-jurusan. Jangan dikembalikan.
+- `resolve_programs()`: admin tanpa filter → `None` (tanpa batas); dosen dari `payload.jurusan`; mahasiswa mencoba `students.program_studi` lalu `users.jurusan`. Tidak cocok → daftar kosong (sengaja tidak memberi baris).
+- `stream_program_ids()` memetakan `students.id` → `program_studi_id` untuk event `dashboard:logs`, memakai exact match yang sama.
 
-Kontrak HTTP di `app/schemas/log.py`:
+## Ingest, realtime, dan konfigurasi
 
-- `BatchLogRequest`: `device_id`, `logs`, `locations`, `idempotency_key`; masing-masing daftar dibatasi 2000 item.
-- `AppLogItem`: `client_id`, `log_date` format YYYY-MM-DD, total/sosmed/game/other dalam menit, unlock, `used_during_class`, `schedule_id` dan metadata aplikasi.
-- Batas saat ini: waktu 0..1440 menit, unlock 0..200; validator memastikan masing-masing komponen tidak melebihi total. Jangan mengklaim validator sudah memeriksa jumlah semua komponen jika belum membaca implementasinya.
-- `LocationLogItem`: `client_id`, `recorded_at`, koordinat, campus, flags kampus/jadwal, `schedule_id`.
-- Response: `idempotency_key`, `status`, `processed_count`, `synced_client_ids`.
+- `POST /api/logs/batch` menerima log + lokasi dengan `client_id`/`idempotency_key`, mengembalikan `synced_client_ids`. Konflik → 409 tanpa ACK agar seluruh batch di-retry; lokasi yang sudah tersimpan tetap diakui.
+- MQTT memakai envelope HMAC per sesi: `monitorung-mqtt-v1\n{topic}\n{sent_at}\n{payload}`, kunci refresh token. Pesan tanpa signature, sesi dicabut, atau selisih jam >300 detik ditolak.
+- Redis pub/sub `dashboard:logs` → WebSocket `/api/logs/stream/ws`. Stream hanya admin/dosen; validasi ulang sebelum tiap event. Event membawa `program_studi_id` untuk filter klien.
+- `/api/config/campus` memberi konfigurasi kampus/geofence dan alamat MQTT ke Android.
 
-`submit_batch()` memakai identitas authenticated, menyiapkan lookup kampus/jadwal/lokasi, lalu meng-upsert log sumber mobile. Index parsial `uq_app_logs_student_date_schedule_mobile` mencakup `student_id`, `log_date`, `schedule_id` untuk `source='mobile'`. Periksa cabang `schedule_id=None` dan perilaku UNIQUE terhadap NULL ketika mengubah deduplikasi; jangan menganggap index menjamin semua bentuk data.
+## Akademik dan jadwal
 
-HTTP mengganti total yang dikirim, bukan menambah total kumulatif ke nilai lama. Lokasi mempunyai dedup key per mahasiswa, timestamp, koordinat yang dibulatkan. Geofence menggunakan kampus yang terhubung lewat jadwal/mata kuliah dan lokasi terkait; status `inside`, `outside`, `unknown` harus tetap berbeda.
+Hierarki: **Fakultas → Jurusan → ProgramStudi → MataKuliah → JadwalMataKuliah**. Master jadwal disalin ke `schedules` per mahasiswa.
 
-Konflik insert HTTP batch membatalkan seluruh transaksi dan mengembalikan 409 tanpa ACK; client mempertahankan antrean untuk retry seluruh batch. Lokasi duplikat tetap mendapat ACK `client_id`, termasuk duplikat dalam satu batch.
+`sync_master_schedules()` (dipanggil `GET /api/schedules`):
+1. Resolve **satu** prodi dengan `match_program()` dari `students.program_studi` lalu `users.jurusan`. Tidak cocok → `return` tanpa menulis baris.
+2. Filter `ProgramStudi.id == prodi_val` (exact). `ilike '%...%'` sudah dihapus.
+3. Rakit seluruh baris dulu, lalu **satu** UPSERT batch; hanya menulis bila ada perubahan. Baris basi dinonaktifkan lewat satu `UPDATE ... WHERE id IN`.
+4. ID memakai UUIDv5 `(students.id, jadwal_id)` agar stabil; jadwal personal UUIDv4 lama dipertahankan.
 
-Commit DB terjadi sebelum background broadcast dan scoring. `_broadcast_new_logs` memberi pembaruan; `score_recently_synced` menilai tanggal terdampak memakai model aktif. Kegagalan push tidak boleh ditafsirkan sebagai kegagalan persist data.
+`_get_or_provision_student()` membuat baris `Student` untuk user yang belum punya, supaya pendaftaran baru tetap bisa melihat jadwal.
 
-MQTT adalah proses terpisah (`python -m app.mqtt_subscriber`) yang membaca topik mahasiswa. Android kini mengirim total absolut per kelas lewat MQTT maupun HTTP. Subscriber MQTT menormalkan `log_date` ke tanggal bisnis, meng-upsert `(student_id, log_date, schedule_id)`, serta memakai hash snapshot untuk deduplikasi replay. Saat mengubah durasi, sumber data atau dedup, telusuri subscriber, batch handler, DAO Android, agregasi laporan dan fitur ML bersama-sama.
+`mata_kuliah._get_or_create_subject()` menjembatani `mata_kuliah` → `subjects` agar dropdown Android (`GET /api/schedules/directory`) sinkron.
 
-Telemetri MQTT wajib memakai envelope JSON `payload` (string JSON asli), `sent_at` (epoch detik), `signature` (HMAC-SHA256 hex lowercase). Pesan yang ditandatangani adalah `monitorung-mqtt-v1\n{topic}\n{sent_at}\n{payload}` dengan UTF-8, memakai refresh token sebagai kunci; token tidak dikirim ke broker. Subscriber memeriksa sesi refresh yang belum kedaluwarsa, akun/mahasiswa aktif, role mahasiswa, dan selisih waktu maksimal 300 detik; ID topik boleh User.id atau Student.id milik sesi yang sama, penyimpanan memakai Student.id. Profil Student harus tersedia. Pesan lama tanpa signature ditolak; HTTP batch tetap tersedia untuk antrean offline. Simulator memerlukan sesi login mahasiswa yang masih berlaku. Signature mengamankan penulisan ingest, bukan isolasi baca topik: kredensial/ACL broker masih bersama.
+**Penting untuk Android:** `schedules.student_id` = `students.id`, sedangkan `student_id` di response `/auth/login` = `users.id`. Android harus mengunci Room dengan `users.id` dari auth, bukan nilai response.
 
-## Realtime dan konfigurasi client
+## Pipeline ML dan skor
 
-- Kanal Redis dashboard: `dashboard:logs`; WebSocket aktif: `/api/logs/stream/ws`.
-- Handler GET pada path WebSocket hanya metadata/preflight; koneksi stream membutuhkan WebSocket upgrade.
-- Auth WS membaca cookie `access_token`, lalu Bearer header untuk client non-browser. JWT query parameter tidak digunakan.
-- Dokumentasi historis menyebut SSE `/api/logs/stream`, `/api/logs/stream-auth`, `sse_token`; route tersebut tidak ada di router logs yang diperiksa. Jangan mendokumentasikannya sebagai transport aktif.
-- `/mqtt` pada `main.py` adalah proxy frame biner ke broker `ws://mqtt:9001/mqtt`, menegosiasikan subprotocol `mqtt` dan menutup kedua arah ketika salah satu berakhir; berbeda dari stream log dashboard.
-- `GET /api/config/campus` mengembalikan kampus aktif pertama atau default, radius, URL MQTT publik/fallback. `MQTT_BROKER_URL` untuk koneksi internal tidak otomatis dapat dijangkau Android.
+1. Fitur dari agregasi log harian; sampel lokasi dipakai sebagai agregasi, bukan pengukuran menit.
+2. Split test 0.2, random_state 42, n_init 10. Dataset kecil punya cabang khusus; data kosong harus error jelas.
+3. StandardScaler di-fit pada train; PCA + KMeans pada representasi itu. Simpan scaler/PCA/KMeans/metrik/konfigurasi/label bersama versi model.
+4. Label dipetakan dari urutan rata-rata screen time; ID klaster mentah tidak bermakna risiko tetap.
+5. `serving.py` harus memakai urutan fitur, transformasi, label, dan versi yang konsisten dengan trainer. Artefak pickle hanya dari sumber internal.
+6. Hasil di `ClusterResult`; invalidasi cache Redis setelah training/pergantian model.
 
-## Model data akademik dan alur pengguna
+Rumus skor di `ml/score.py`, terpisah dari assignment KMeans. Default: screen time cap 480 menit bobot 0.35; sosmed+game cap 240 bobot 0.25; unlock cap 10 bobot 0.20; fraksi penggunaan dalam kelas 0.10; penalti kecocokan jadwal <0.5 sebesar 0.10. Hasil dibatasi 1, dibulatkan 3 desimal. Jangan duplikasi rumus di UI.
 
-Struktur akademik mencakup fakultas, jurusan, program studi, mata kuliah, dan jadwal mata kuliah. `Schedule` merupakan jadwal mahasiswa; `ScheduleRequest` adalah pengajuan yang disetujui/ditolak staf melalui `/schedule-requests`. `RequestAkademik` adalah alur request akademik tersendiri melalui `/request-akademik`; jangan menyatukan kedua jenis request hanya karena namanya mirip.
+Scheduler cek tiap 60 detik, slot `>=` untuk mengejar waktu terlewat, flag direset per tanggal UTC. Scoring dipanggil saat training baru diantrekan, bukan menunggu selesai. Flag cutoff/training hanya diset setelah enqueue berhasil.
 
-Perubahan field akademik bisa menjangkau router/schema/model, halaman `website/src/app/(dashboard)/akademik/page.tsx`, API web, DTO/repository/screen jadwal Android, dan lookup kampus pada geofence. Detail relasi harus dibaca dari model aktual sebelum migrasi.
-
-## Pipeline ML dan arti hasil
-
-1. `build_feature_dataframe()` membaca log, memakai `coalesce(log_date, timestamp)`, lalu mengelompokkan per mahasiswa/tanggal. Waktu dan unlock saat ini diagregasi `max`, flag penggunaan dalam kelas `mean`. Data lokasi memberi jumlah sampel di kampus dan rata-rata kecocokan jadwal.
-2. Tujuh fitur berurutan: `screen_time`, `sosmed_time`, `game_time`, `unlock_count`, `campus_duration`, `schedule_match_rate`, `used_during_class_int`. `campus_duration` pada trainer adalah agregasi sampel lokasi, bukan pengukuran menit langsung.
-3. Default split test 0.2, random state 42, n_init 10. Dataset kecil menggunakan cabang khusus; data kosong/tidak cukup harus menghasilkan error yang jelas.
-4. StandardScaler di-fit pada train; PCA dan KMeans bekerja pada representasi tersebut. Simpan scaler/PCA/KMeans, metrik, konfigurasi dan label bersama versi model.
-5. Label dipetakan berdasarkan urutan rata-rata screen time klaster. Label/config dapat berubah; ID mentah klaster tidak bermakna tingkat risiko tetap.
-6. `serving.py` harus memakai urutan fitur, transformasi, label, dan versi aktif yang konsisten dengan trainer. Artefak pickle hanya dari sumber internal tepercaya; jangan menerima pickle pengguna.
-7. Hasil disimpan pada `ClusterResult`; invalidasi cache lintas proses melalui Redis diperlukan setelah pergantian/training model.
-
-Rumus skor ada di `ml/score.py`, terpisah dari assignment K-Means. Default: screen time cap 480 menit berbobot 0.35; sosmed+game cap 240 berbobot 0.25; unlock cap 10 berbobot 0.20; fraksi penggunaan dalam kelas berbobot 0.10; penalti kecocokan jadwal di bawah 0.5 sebesar 0.10. Hasil dibatasi maksimum 1 dan dibulatkan tiga desimal. Environment dapat mengubah parameter; jangan menduplikasi rumus di UI.
-
-Manual training melalui `/api/models/train`; history/config/results/predict/activate berada di `routers/models.py`. Manual training dan RQ worker mempunyai jalur orkestrasi masing-masing; baca keduanya jika mengubah persist status/model.
-
-Scheduler memeriksa tiap 60 detik, memakai slot `>=` untuk mengejar waktu terlewat, reset flag berdasarkan tanggal UTC. Meskipun komentar menyebut scoring 23:30, kode snapshot ini memanggil scoring pada iterasi saat training baru diantrekan, bukan menunggu 30 menit atau keberhasilan job. Jangan menjanjikan urutan selesai-training-lalu-score tanpa memperbaiki dan mengujinya.
-
-Flag cutoff/training hanya disetel setelah enqueue berhasil; gangguan Redis dicoba ulang pada tick berikutnya.
-
-Laporan `/api/reports` mengembalikan `avg_distraction_score` dari AVG skor tersimpan pada model aktif, rentang tanggal, dan filter ID klaster. Tidak ada skor menghasilkan null, bukan nol. `/api/reports/cluster-trends` menyertakan `cluster_counts` berlabel dinamis dan rerata skor berbobot jumlah skor non-null dalam bucket; ID klaster tidak digunakan sebagai urutan risiko.
+Laporan `/api/reports`: `avg_distraction_score` dari AVG skor model aktif; tanpa skor → null bukan nol. `/api/reports/cluster-trends` memberi `cluster_counts` berlabel dinamis.
 
 ## AI dan push
 
-`routers/ai.py` mengatur konteks, chat, daftar model dan pool Groq. Key berasal dari `GROQ_API_KEY_1` sampai `GROQ_API_KEY_4` di server; default model kode adalah `openai/gpt-oss-120b` melalui Groq. Jangan meminta key Groq dari browser berdasarkan catatan lama. Tanpa key terkonfigurasi fitur AI dapat mengembalikan 503.
+`routers/ai.py` mengatur konteks, chat, daftar model, pool Groq. Key `GROQ_API_KEY_1..4` di server; default `openai/gpt-oss-120b`. Tanpa key → 503. Jangan minta key Groq dari browser.
 
-FCM memerlukan Firebase service account melalui konfigurasi server dan registrasi token perangkat. Kehadiran SDK tidak membuktikan push siap produksi. Hindari mencatat token perangkat atau konteks mahasiswa yang sensitif.
+FCM butuh service account server + token perangkat. Kehadiran SDK bukan bukti push siap produksi. Jangan catat token perangkat atau konteks mahasiswa sensitif.
 
 ## Menjalankan dan memeriksa
 
-Semua perintah Python berikut dari `server/`, setelah virtualenv/dependency dan environment disiapkan pada DB development terpisah:
+Dari `server/`, setelah virtualenv dan environment dev siap:
 
 ```bash
 source venv/bin/activate
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
-# Proses terpisah, gunakan Redis yang sama dengan konfigurasi API:
 rq worker monitoring --url redis://localhost:6379/0
 python -m app.schedules.scheduler
 python -m app.mqtt_subscriber
 ```
 
-Nama queue benar adalah `monitoring`, bukan `monitoring-worker` dari README lama. `USE_FAKEREDIS=true` menjalankan enqueue via thread in-process; tidak membuktikan pub/sub atau antrean lintas proses. Settings memerlukan `SECRET_KEY`, `MQTT_USERNAME`, `MQTT_PASSWORD`, URL DB async/sync yang sesuai. Jangan mencetak nilainya.
+Queue bernama `monitoring`. `USE_FAKEREDIS=true` menjalankan enqueue in-process; tidak membuktikan pub/sub lintas proses. Settings butuh `SECRET_KEY`, `MQTT_USERNAME`, `MQTT_PASSWORD`, URL DB async/sync. Jangan cetak nilainya.
 
-`./run.sh status` meneruskan ke `../scripts/run-server.sh`; mode start mengelola proses. Startup FastAPI memanggil migrasi dan cleanup DB: pilih DB disposable sebelum smoke test.
+Startup FastAPI menjalankan migrasi dan cleanup DB — pilih DB disposable sebelum smoke test. Mode lokal dikelola `../scripts/run-server.sh`; `server/run.sh` meneruskannya.
 
-Pemeriksaan yang tersedia:
+Pemeriksaan:
+- `python -m scripts.backend_regression_check` — fixture SQLite in-memory, tanpa `.env`/lifespan. Mencakup password, otorisasi HTTP/WS, rollback/ACK batch, signature MQTT, retry scheduler. `MONITORUNG_CHECK_DATABASE_URL` hanya untuk DB disposable bernama `monitorung_regression`.
+- `python -m scripts.scheduler_slot_check`, `python -m scripts.ml_pipeline_smoke_test`.
+- `scripts/smoke_test.py` lama memakai kontrak login usang; jangan jalankan ke data aktif.
 
-- `python -m scripts.backend_regression_check`: fixture sintetis SQLite in-memory, tanpa `.env`/lifespan API; password, otorisasi HTTP/WS, rollback/ACK batch, signature MQTT, proxy biner, retry scheduler. `MONITORUNG_CHECK_DATABASE_URL` opsional hanya untuk DB disposable bernama `monitorung_regression`; jangan arahkan ke DB aktif. Pemeriksaan juga telah dijalankan pada PostgreSQL 16 disposable.
-- `python -m scripts.scheduler_slot_check`: loop scheduler dengan fake clock/enqueue, setelah environment development valid tersedia.
-- `python -m scripts.ml_pipeline_smoke_test`: pemeriksaan timezone/COALESCE/agregasi SQLite in-memory; masih mengimpor konfigurasi aplikasi.
-- `scripts/smoke_test.py` lama menggunakan kontrak login `username` dan menulis batch; jangan jalankan terhadap data aktif atau anggap kompatibel tanpa pembaruan.
-- Untuk kontrak baru, tambah satu regression check terfokus pada input, otorisasi, dedup, waktu atau agregasi yang berubah. Perubahan DB memerlukan pemeriksaan SQLite dan PostgreSQL bila memakai fitur spesifik dialek.
+Untuk kontrak baru, tambah satu regression check terfokus pada input/otorisasi/dedup/waktu/agregasi yang berubah. Manual training: `POST /api/models/train`; history/config/results/predict/activate di `routers/models.py`. Manual training dan RQ worker punya jalur orkestrasi berbeda — baca keduanya bila mengubah persist status/model.
 
-## PostgreSQL VPS 2026-11-14
+## Optimasi performa (terpasang)
 
-Production VPS `213.163.207.199` memakai PostgreSQL **18.7** (`postgres:18.7-alpine`), override `/opt/monitorung/compose.vps.yml`; compose dasar/lokal tetap 16. Migrasi logical dump/restore ke volume `monitorung-postgres18-data` dengan PGDATA `/var/lib/postgresql/18/docker`. Regresi backend pada DB PostgreSQL 18 disposable lulus; fingerprint seluruh tabel/sequence cocok setelah restore final, ANALYZE dan koneksi asyncpg/psycopg2 lulus. Delapan layanan healthy. Backup serta konfigurasi sebelumnya tersimpan privat di `/opt/monitorung/releases/postgres18/`, volume PostgreSQL 16 dipertahankan. Rollback setelah ada penulisan baru membutuhkan rekonsiliasi agar tidak kehilangan data.
+- DB UpCloud remote (~1,5 ms/round-trip): jumlah query lebih menentukan daripada CPU. `GET /api/schedules` turun dari 96,4 ms/53 query ke 18,4 ms/12 query lewat UPSERT batch + tulis hanya saat berubah.
+- `get_db()` → `configure_request_scope()` sudah mengautentikasi; payload dibagikan lewat `request.state.auth_payload` agar route tidak autentikasi dua kali. **Jangan memoize hasil `get_current_user()`**: regression test menonaktifkan akun pada objek `Request` yang sama dan harus tetap 401.
+- Index di `_INDEX_DEFINITIONS` (`database.py`), dibuat idempoten saat startup: `location_logs.idempotency_key`, `location_logs(student_id, timestamp)`, `app_logs.idempotency_key`, `cluster_results(model_version_id, result_date)`.
 
-## Managed PostgreSQL UpCloud 2026-11-14
+## Production
 
-Status production terbaru menggantikan database container VPS: **UpCloud PostgreSQL 18.7**, database `defaultdb`, melalui private network. `/opt/monitorung/.env.production` menyimpan `UPCLOUD_DATABASE_URL` dan `UPCLOUD_DATABASE_SYNC_URL`; Compose override menerapkannya pada API/worker/scheduler/subscriber dengan `PGSSLMODE=require`. URL tanpa parameter query SSL menjaga kompatibilitas asyncpg dan helper `get_sync_engine()` yang menurunkan URL dari async; kedua driver terbukti menggunakan TLS di keempat proses. TLS require mengenkripsi, belum validasi CA/hostname verify-full.
+VPS `root@213.163.207.199`, `/opt/monitorung`. Compose:
+`docker compose --env-file .env.production -f docker-compose.yml -f compose.vps.yml <cmd>`
 
-Regresi backend pada DB disposable UpCloud lulus. Dump final setelah penghentian writer, restore, fingerprint seluruh tabel/sequence dan ANALYZE lulus. Container postgres lokal berhenti, profile `local-db-rollback`; volume dan backup privat `/opt/monitorung/releases/upcloud/` dipertahankan. Jangan rollback ke data lokal lama setelah ada penulisan di UpCloud tanpa sinkronisasi balik. Website/API 200 dan auth tanpa sesi 401; login nyata dan training telah diuji pengguna (konfirmasi 2026-11-14; bukan pengujian ulang oleh agen). Kredensial yang pernah masuk chat harus dirotasi di penyedia lalu URL runtime diperbarui, tanpa menyalin secret ke memory/log.
+Database **Managed PostgreSQL UpCloud 18.7** (`defaultdb`) via private network. `UPCLOUD_DATABASE_URL`/`UPCLOUD_DATABASE_SYNC_URL` di `.env.production`, `PGSSLMODE=require`. URL tanpa parameter SSL agar asyncpg dan helper sync sama-sama jalan. TLS aktif; belum verify-full. Container postgres lokal berhenti, profile `local-db-rollback`; jangan rollback ke data lokal tanpa sinkronisasi balik.
 
-## Perubahan 2026-11-16 (ponytail batch)
+Deploy: build → `docker save | gzip | ssh | docker load` → `up -d --no-deps --wait api worker scheduler subscriber web`. **Tidak ada backup tersisa** (dihapus 2026-11-17); rollback hanya lewat rebuild.
 
-**Login NIM fallback** (`app/routers/auth.py`): setelah lookup email/username gagal, ada fallback join ke tabel `students` untuk lookup `Student.nim == nim_val`. Ini memungkinkan mahasiswa login menggunakan NIM selain username.
+Status 2026-11-17: `monitorung-api:latest` `sha256:2f22741ace64…`. Tujuh layanan healthy. Data akademik production dikosongkan agar dibangun ulang manual; users, students, campuses, app_logs, location_logs, cluster_results, model_versions dipertahankan.
 
-**Jadwal sync** (`app/routers/schedule.py`): `sync_master_schedules()` kini case-insensitive via `ilike`/`func.lower()` saat mencocokkan `program_studi`; fallback ke `User.jurusan` jika `student.program_studi` kosong. Query ke `JadwalMataKuliah` dan master rows memakai `.execution_options(skip_academic_scope=True)`.
+## Batas memory
 
-**Academic scope bypass** (`app/academic_scope.py`): listener `restrict_queries` cek `state.execution_options.get("skip_academic_scope", False)` sebelum menerapkan filter; constraint `len(matching)==1` dihapus; pencocokan afiliasi dosen diperluas ke substring match.
-
-**Stream scope** (`stream_program_ids`): publish HTTP batch (`routers/logs.py`) dan MQTT (`mqtt_subscriber.py`) menambah `program_studi_id` pada event `dashboard:logs`. Teks `Student.program_studi` dicocokkan ke id/kode/nama prodi, termasuk substring, sama dengan `resolve_programs`. Event tanpa field tetap sah untuk publisher lama. Bukan filter RBAC di server; klien yang membuang event di luar filter.
-
-Cek: `py_compile` file terkait lulus. `stream_program_ids` pada SQLite memori: `"Teknik Informatika"` → prodi `Informatika`. Bukan `backend_regression_check` penuh. Login NIM tetap case-sensitive.
-
-**Deploy 2026-11-16:** image `monitorung-api:latest` `sha256:bc620d29229d…` pada api, worker, scheduler, subscriber. Rollback `monitorung-api:rollback-20261116`. Backup UpCloud `/opt/monitorung/releases/20261116-filter/upcloud.dump` (477239 byte). Postgres/redis/mqtt tidak direstart. Probe publik status 200, auth tanpa sesi 401. Login nyata belum diuji ulang.
-
-## Batas dan pemeliharaan memory
-
-Sumber utama: file pada tabel kepemilikan, `requirements.txt`, `Dockerfile`, `../docker-compose.yml`. `README.md`, `DEPLOYMENT.md`, dan `CLAUDE.md` membantu konteks historis tetapi memuat detail usang. Memory ini tidak menyatakan API, broker, DB, worker, training atau AI sudah diuji berjalan. Perbarui bagian terkait setiap kali kontrak, role, versi, agregasi atau alur berubah.
-
-## Perbaikan jadwal/mata kuliah kosong untuk mahasiswa (2026-11-16)
-
-`students.program_studi` adalah teks bebas yang bisa basi (`"Weerr"`, kosong), sehingga `sync_master_schedules()` dan `resolve_programs()` role mahasiswa menghasilkan daftar kosong walau admin sudah membuat mata kuliah dan jadwal. Keduanya sekarang mencoba nilai itu lebih dulu lalu jatuh ke `users.jurusan` bila tidak cocok dengan prodi aktif mana pun; `academic_scope` memakai pencocokan yang sama untuk scope baca. Cek: skrip SQLite lokal berasert (prodi basi + jurusan `PTI`/`Sistem Informasi`) lulus, `py_compile` lulus. Belum dideploy; image VPS masih memuat kode lama.
-
-## Optimasi performa 2026-11-16
-
-Diukur di VPS: DB UpCloud remote, ~1,5ms per round-trip, jadi jumlah query per request lebih menentukan daripada CPU. `GET /api/schedules` tadinya 53–48 query/request karena `sync_master_schedules()` melakukan satu UPSERT per slot jadwal dan **menulis setiap kali dibaca**. Sekarang baris dirakit dulu, UPSERT sekali (batch `values(list)` + `on_conflict_do_update`), dan hanya menulis bila ada yang berubah; baris basi dinonaktifkan lewat satu `UPDATE ... WHERE id IN`. Hasil harness in-process (40 slot, auth dihitung): 96,4ms/53 query/2 auth → 18,4ms/12 query/1 auth.
-
-Auth ganda: `get_db()` → `configure_request_scope()` sudah memanggil `authenticate_access_token()`, lalu route memanggil `get_current_user()` lagi. Payload sekarang dibagikan lewat `request.state.auth_payload`. **Jangan** memoize hasil `get_current_user()` sendiri: `backend_regression_check.py` mensimulasikan akun yang dinonaktifkan dengan objek `Request` yang sama dan harus tetap 401; menyimpan hasil di state membuat test itu gagal (sempat terjadi, sudah dikembalikan).
-
-Index baru di `_INDEX_DEFINITIONS` (`database.py`): `location_logs.idempotency_key`, `location_logs(student_id, timestamp)`, `app_logs.idempotency_key`, `cluster_results(model_version_id, result_date)`. Sebelumnya lookup idempotency ingest dan filter laporan melakukan seq scan. Dibuat lewat `run_index_migrations()` saat startup, idempoten.
-
-Cek: 9 cek `backend_regression_check.py` PASS; skrip SQLite berasert untuk sync (tulis awal, no-op tidak menulis, edit master merambat, slot nonaktif menonaktifkan baris) dan auth (akun nonaktif 401, role ikut DB) lulus; `py_compile` lulus. Belum diukur pada trafik nyata, dan index belum ada di production sampai deploy.
+Disusun dari pembacaan kode dan konfigurasi, bukan pengujian runtime. `README.md`, `DEPLOYMENT.md`, dan `CLAUDE.md` memuat detail historis dan sebagian usang. Perbarui bagian ini setiap kontrak, role, versi, agregasi, atau alur berubah.

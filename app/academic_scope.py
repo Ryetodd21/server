@@ -16,6 +16,58 @@ from app.models.location_log import LocationLog
 from app.models.cluster_result import ClusterResult
 
 
+def normalize_academic_name(value: str | None) -> str:
+    """Canonical form for comparing free-text affiliations with master rows.
+
+    Legacy `users.jurusan` / `students.program_studi` are free text, so
+    "Sistem  Informasi" and "sistem informasi" must compare equal. Punctuation
+    is dropped so "S.Kom" still lines up with a "S Kom" style code.
+    """
+    cleaned = "".join(ch if ch.isalnum() else " " for ch in (value or "").casefold())
+    return " ".join(cleaned.split())
+
+
+def match_program(programs, value):
+    """Resolve one free-text affiliation to exactly one ProgramStudi.
+
+    Exact match on id/code/name only. The previous substring test
+    (`value in p.name or p.name in value`) leaked across departments: the
+    prodi code "SI" matched "Pendidikan Teknologi Informasi" because
+    "informasi" contains "si", so a Sistem Informasi lecturer saw PTI data.
+    The SQL side already compares exactly (`Student.program_studi.in_(names)`),
+    so substring matching here was also inconsistent with the scoping applied
+    to the rows themselves.
+    """
+    text = normalize_academic_name(value)
+    if not text:
+        return None
+    for p in programs:
+        candidates = {
+            normalize_academic_name(p.id),
+            normalize_academic_name(p.code),
+            normalize_academic_name(p.name),
+        }
+        if text in candidates:
+            return p
+    return None
+
+
+def match_department(departments, value):
+    """Exact-match a free-text affiliation against a Jurusan row."""
+    text = normalize_academic_name(value)
+    if not text:
+        return None
+    for d in departments:
+        candidates = {
+            normalize_academic_name(d.id),
+            normalize_academic_name(d.code),
+            normalize_academic_name(d.name),
+        }
+        if text in candidates:
+            return d
+    return None
+
+
 async def resolve_programs(db, payload, jurusan_id=None, program_studi_id=None):
     """None means unrestricted; an empty list deliberately grants no rows."""
     role = payload.get("role")
@@ -24,18 +76,14 @@ async def resolve_programs(db, payload, jurusan_id=None, program_studi_id=None):
     programs = (await db.execute(select(ProgramStudi))).scalars().all()
     departments = (await db.execute(select(Jurusan))).scalars().all()
     if role == "dosen":
-        affiliation = (payload.get("jurusan") or "").strip().casefold()
-        matching = {p.jurusan_id for p in programs
-                    if affiliation and (
-                        affiliation in {p.id.casefold(), p.code.casefold(), p.name.casefold()}
-                        or affiliation in p.name.casefold() or p.name.casefold() in affiliation
-                    )}
-        matching.update(d.id for d in departments
-                        if affiliation and (
-                            affiliation in {d.id.casefold(), d.code.casefold(), d.name.casefold()}
-                            or affiliation in d.name.casefold() or d.name.casefold() in affiliation
-                        ))
-        matching.discard(None)
+        affiliation = payload.get("jurusan")
+        matched_prodi = match_program(programs, affiliation)
+        matched_department = match_department(departments, affiliation)
+        matching = set()
+        if matched_prodi and matched_prodi.jurusan_id:
+            matching.add(matched_prodi.jurusan_id)
+        if matched_department:
+            matching.add(matched_department.id)
         programs = [p for p in programs if p.jurusan_id in matching] if matching else []
     elif role == "mahasiswa":
         # students.program_studi is admin free text and can be stale ("Weerr",
@@ -44,13 +92,8 @@ async def resolve_programs(db, payload, jurusan_id=None, program_studi_id=None):
         raw = [(await db.execute(select(Student.program_studi).where(
             Student.user_id == payload["sub"]))).scalar_one_or_none(),
                payload.get("jurusan")]
-        def _match(value):
-            a = (value or "").strip().casefold()
-            return [p for p in programs if a and (
-                a in {p.id.casefold(), p.code.casefold(), p.name.casefold()}
-                or a in p.name.casefold() or p.name.casefold() in a
-            )]
-        programs = next((m for m in (_match(v) for v in raw) if m), [])
+        matched = next((p for p in (match_program(programs, v) for v in raw) if p), None)
+        programs = [matched] if matched else []
     elif role != "admin":
         programs = []
     if jurusan_id:
@@ -164,14 +207,7 @@ async def stream_program_ids(db, student_ids: list[str]) -> dict[str, str | None
     programs = (await db.execute(select(ProgramStudi))).scalars().all()
     out: dict[str, str | None] = {}
     for student_id, raw in students:
-        text = (raw or "").strip().casefold()
-        match = next((
-            p for p in programs
-            if text and (
-                text in {p.id.casefold(), p.code.casefold(), p.name.casefold()}
-                or text in p.name.casefold() or p.name.casefold() in text
-            )
-        ), None)
+        match = match_program(programs, raw)
         out[student_id] = match.id if match else None
     return out
 

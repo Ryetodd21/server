@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, func, or_, update
+from sqlalchemy import select, delete, update
 from sqlalchemy.orm import selectinload
 from app.database import get_db
 from app.models.schedule import Schedule, Subject, Lecturer
@@ -29,6 +29,7 @@ async def sync_master_schedules(db: AsyncSession, student: Student):
     # student.program_studi is admin-typed free text and often stale ("Weerr"),
     # so fall back to the user's own affiliation when it matches no prodi.
     from app.models.program_studi import ProgramStudi
+    from app.academic_scope import match_program
 
     candidates = [(student.program_studi or "").strip()]
     if student.user_id:
@@ -41,14 +42,13 @@ async def sync_master_schedules(db: AsyncSession, student: Student):
         select(ProgramStudi).where(ProgramStudi.is_active.is_(True))
     )).scalars().all()
 
-    def _matches(value: str) -> bool:
-        v = value.casefold()
-        return bool(v) and any(
-            v in {p.id.casefold(), p.code.casefold(), p.name.casefold()} or v in p.name.casefold()
-            for p in all_programs
-        )
-
-    prodi_val = next((c for c in candidates if _matches(c)), candidates[0])
+    # Exact match only. Substring matching used to pull in the wrong prodi:
+    # the code "SI" matched "Pendidikan Teknologi Informasi" because
+    # "informasi" contains "si", so Sistem Informasi students got PTI classes.
+    resolved = next((p for p in (match_program(all_programs, c) for c in candidates) if p), None)
+    if resolved is None:
+        return
+    prodi_val = resolved.id
 
     # UUIDv5 keeps one stable schedule per student/slot, including concurrent fetches.
     # Existing UUIDv4 personal schedules and historical log references are retained.
@@ -58,12 +58,9 @@ async def sync_master_schedules(db: AsyncSession, student: Student):
     manual_keys = {(s.subject_id, s.day_of_week, s.start_time, s.end_time)
                    for s in existing if s.id not in managed_ids and s.is_active}
 
-    prodi_cond = or_(
-        func.lower(ProgramStudi.name) == prodi_val.lower(),
-        func.lower(ProgramStudi.code) == prodi_val.lower(),
-        ProgramStudi.id == prodi_val,
-        ProgramStudi.name.ilike(f"%{prodi_val}%"),
-    ) if prodi_val else False
+    # One resolved prodi id, compared exactly. The old `ilike %name%` branch
+    # matched every prodi whose name contained the student's text.
+    prodi_cond = ProgramStudi.id == prodi_val
 
     rows = (await db.execute(
         select(JadwalMataKuliah, MataKuliah, Subject.id, User.full_name)
