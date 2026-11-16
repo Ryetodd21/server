@@ -146,6 +146,16 @@ Status production terbaru menggantikan database container VPS: **UpCloud Postgre
 
 Regresi backend pada DB disposable UpCloud lulus. Dump final setelah penghentian writer, restore, fingerprint seluruh tabel/sequence dan ANALYZE lulus. Container postgres lokal berhenti, profile `local-db-rollback`; volume dan backup privat `/opt/monitorung/releases/upcloud/` dipertahankan. Jangan rollback ke data lokal lama setelah ada penulisan di UpCloud tanpa sinkronisasi balik. Website/API 200 dan auth tanpa sesi 401; login nyata dan training telah diuji pengguna (konfirmasi 2026-11-14; bukan pengujian ulang oleh agen). Kredensial yang pernah masuk chat harus dirotasi di penyedia lalu URL runtime diperbarui, tanpa menyalin secret ke memory/log.
 
+## Perubahan 2026-11-16 (ponytail batch)
+
+**Login NIM fallback** (`app/routers/auth.py`): setelah lookup email/username gagal, ada fallback join ke tabel `students` untuk lookup `Student.nim == nim_val`. Ini memungkinkan mahasiswa login menggunakan NIM selain username.
+
+**Jadwal sync** (`app/routers/schedule.py`): `sync_master_schedules()` kini case-insensitive via `ilike`/`func.lower()` saat mencocokkan `program_studi`; fallback ke `User.jurusan` jika `student.program_studi` kosong. Query ke `JadwalMataKuliah` dan master rows memakai `.execution_options(skip_academic_scope=True)`.
+
+**Academic scope bypass** (`app/academic_scope.py`): listener `restrict_queries` cek `state.execution_options.get("skip_academic_scope", False)` sebelum menerapkan filter; constraint `len(matching)==1` dihapus; pencocokan afiliasi dosen diperluas ke substring match.
+
+Sintaks ketiga file lulus `python3 -m py_compile`.
+
 ## Batas dan pemeliharaan memory
 
 Sumber utama: file pada tabel kepemilikan, `requirements.txt`, `Dockerfile`, `../docker-compose.yml`. `README.md`, `DEPLOYMENT.md`, dan `CLAUDE.md` membantu konteks historis tetapi memuat detail usang. Memory ini tidak menyatakan API, broker, DB, worker, training atau AI sudah diuji berjalan. Perbarui bagian terkait setiap kali kontrak, role, versi, agregasi atau alur berubah.

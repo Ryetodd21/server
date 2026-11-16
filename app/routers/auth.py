@@ -229,6 +229,11 @@ async def login(
         user = (await db.execute(
             select(User).where(User.username == nim_val)
         )).scalar_one_or_none()
+    if user is None and nim_val:
+        # Fall back to student NIM if user used NIM instead of username
+        user = (await db.execute(
+            select(User).join(Student, Student.user_id == User.id).where(Student.nim == nim_val)
+        )).scalar_one_or_none()
     if user is None:
         # Run bcrypt against the dummy hash so timing matches the wrong-password
         # path — closes the user-enumeration timing oracle. See _DUMMY_HASH doc.

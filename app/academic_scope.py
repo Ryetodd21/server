@@ -26,20 +26,25 @@ async def resolve_programs(db, payload, jurusan_id=None, program_studi_id=None):
     if role == "dosen":
         affiliation = (payload.get("jurusan") or "").strip().casefold()
         matching = {p.jurusan_id for p in programs
-                    if affiliation and affiliation in {p.id.casefold(), p.code.casefold(), p.name.casefold()}}
+                    if affiliation and (
+                        affiliation in {p.id.casefold(), p.code.casefold(), p.name.casefold()}
+                        or affiliation in p.name.casefold() or p.name.casefold() in affiliation
+                    )}
         matching.update(d.id for d in departments
-                        if affiliation and affiliation in {d.id.casefold(), d.code.casefold(), d.name.casefold()})
+                        if affiliation and (
+                            affiliation in {d.id.casefold(), d.code.casefold(), d.name.casefold()}
+                            or affiliation in d.name.casefold() or d.name.casefold() in affiliation
+                        ))
         matching.discard(None)
-        # Legacy free text must resolve to exactly one department.
-        programs = [p for p in programs if p.jurusan_id in matching] if len(matching) == 1 else []
+        programs = [p for p in programs if p.jurusan_id in matching] if matching else []
     elif role == "mahasiswa":
         affiliation = (await db.execute(select(Student.program_studi).where(
             Student.user_id == payload["sub"]))).scalar_one_or_none()
         affiliation = (affiliation or payload.get("jurusan") or "").strip().casefold()
-        programs = [p for p in programs if affiliation and affiliation in {
-            p.id.casefold(), p.code.casefold(), p.name.casefold()}]
-        if len(programs) != 1:
-            programs = []
+        programs = [p for p in programs if affiliation and (
+            affiliation in {p.id.casefold(), p.code.casefold(), p.name.casefold()}
+            or affiliation in p.name.casefold() or p.name.casefold() in affiliation
+        )]
     elif role != "admin":
         programs = []
     if jurusan_id:
@@ -86,7 +91,7 @@ def install_scope(db, programs, payload):
 
     @event.listens_for(session, "do_orm_execute")
     def restrict_queries(state):
-        if state.is_select or state.is_update or state.is_delete:
+        if (state.is_select or state.is_update or state.is_delete) and not state.execution_options.get("skip_academic_scope", False):
             state.statement = state.statement.options(*[
                 with_loader_criteria(model, condition, include_aliases=True)
                 for model, condition in criteria.items()

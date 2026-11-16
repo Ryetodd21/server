@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func, or_
 from sqlalchemy.orm import selectinload
 from app.database import get_db
 from app.models.schedule import Schedule, Subject, Lecturer
@@ -27,13 +27,27 @@ async def sync_master_schedules(db: AsyncSession, student: Student):
     from sqlalchemy.dialects.postgresql import insert as pg_insert
     from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+    if not student.program_studi and student.user_id:
+        user_jurusan = (await db.execute(select(User.jurusan).where(User.id == student.user_id))).scalar_one_or_none()
+        if user_jurusan:
+            student.program_studi = user_jurusan
+
     # UUIDv5 keeps one stable schedule per student/slot, including concurrent fetches.
     # Existing UUIDv4 personal schedules and historical log references are retained.
-    slot_ids = (await db.execute(select(JadwalMataKuliah.__table__.c.id))).scalars().all()
+    slot_ids = (await db.execute(select(JadwalMataKuliah.__table__.c.id).execution_options(skip_academic_scope=True))).scalars().all()
     managed_ids = {master_schedule_id(student.id, sid) for sid in slot_ids}
     existing = (await db.execute(select(Schedule).where(Schedule.student_id == student.id))).scalars().all()
     manual_keys = {(s.subject_id, s.day_of_week, s.start_time, s.end_time)
                    for s in existing if s.id not in managed_ids and s.is_active}
+
+    prodi_val = (student.program_studi or "").strip()
+    prodi_cond = or_(
+        func.lower(ProgramStudi.name) == prodi_val.lower(),
+        func.lower(ProgramStudi.code) == prodi_val.lower(),
+        ProgramStudi.id == prodi_val,
+        ProgramStudi.name.ilike(f"%{prodi_val}%"),
+    ) if prodi_val else False
+
     rows = (await db.execute(
         select(JadwalMataKuliah, MataKuliah, Subject.id, User.full_name)
         .join(MataKuliah, JadwalMataKuliah.mata_kuliah_id == MataKuliah.id)
@@ -41,9 +55,9 @@ async def sync_master_schedules(db: AsyncSession, student: Student):
         .outerjoin(Subject, Subject.code == MataKuliah.code)
         .outerjoin(User, MataKuliah.dosen_id == User.id)
         .where(ProgramStudi.is_active.is_(True),
-               (ProgramStudi.name == student.program_studi) | (ProgramStudi.code == student.program_studi)
-               | (ProgramStudi.id == student.program_studi),
+               prodi_cond,
                MataKuliah.is_active.is_(True), JadwalMataKuliah.is_active.is_(True))
+        .execution_options(skip_academic_scope=True)
     )).all()
     active_ids = set()
     insert = pg_insert if db.bind.dialect.name == "postgresql" else sqlite_insert
