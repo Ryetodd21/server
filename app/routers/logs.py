@@ -108,6 +108,9 @@ async def _broadcast_new_logs(
     if redis_client is not None:
         try:
             async with async_session() as session:
+                from app.academic_scope import stream_program_ids
+                program_ids = await stream_program_ids(session, [student_id])
+                program_id = program_ids.get(student_id)
                 if log_dates:
                     # AwareDateTime decorator normalizes to UTC. Querying by
                     # `func.date(log_date)` is portable across SQLite +
@@ -142,6 +145,7 @@ async def _broadcast_new_logs(
                                     "game_time_minutes": row.game_time_minutes,
                                     "unlock_count": row.unlock_count,
                                     "used_during_class": row.used_during_class,
+                                    "program_studi_id": program_id,
                                 },
                                 default=str,
                             ),
@@ -163,6 +167,7 @@ async def _broadcast_new_logs(
                                     "matches_schedule": row.matches_schedule,
                                     "latitude": row.latitude,
                                     "longitude": row.longitude,
+                                    "program_studi_id": program_id,
                                 },
                                 default=str,
                             ),

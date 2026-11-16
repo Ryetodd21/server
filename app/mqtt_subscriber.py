@@ -239,6 +239,8 @@ async def handle_app_log(topic: str, payload: dict, student_id: str):
 
         logger.info(f"AppLog saved: student={student_id}, screen_time={log.total_screen_time_minutes}m")
 
+        from app.academic_scope import stream_program_ids
+        program_id = (await stream_program_ids(session, [student_id])).get(student_id)
         # Publish to Redis for dashboard SSE
         await publish_to_redis("dashboard:logs", {
             "type": "app_log",
@@ -249,6 +251,7 @@ async def handle_app_log(topic: str, payload: dict, student_id: str):
             "game_time_minutes": log.game_time_minutes,
             "unlock_count": log.unlock_count,
             "used_during_class": log.used_during_class,
+            "program_studi_id": program_id,
         })
 
 
@@ -295,12 +298,15 @@ async def handle_location_log(topic: str, payload: dict, student_id: str):
 
         logger.info(f"LocationLog saved: student={student_id}, on_campus={log.is_on_campus}")
 
+        from app.academic_scope import stream_program_ids
+        program_id = (await stream_program_ids(session, [student_id])).get(student_id)
         await publish_to_redis("dashboard:logs", {
             "type": "location_log",
             "student_id": student_id,
             "recorded_at": recorded_at.isoformat(),
             "is_on_campus": log.is_on_campus,
             "matches_schedule": log.matches_schedule,
+            "program_studi_id": program_id,
         })
 
 

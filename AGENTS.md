@@ -154,8 +154,16 @@ Regresi backend pada DB disposable UpCloud lulus. Dump final setelah penghentian
 
 **Academic scope bypass** (`app/academic_scope.py`): listener `restrict_queries` cek `state.execution_options.get("skip_academic_scope", False)` sebelum menerapkan filter; constraint `len(matching)==1` dihapus; pencocokan afiliasi dosen diperluas ke substring match.
 
-Sintaks ketiga file lulus `python3 -m py_compile`.
+**Stream scope** (`stream_program_ids`): publish HTTP batch (`routers/logs.py`) dan MQTT (`mqtt_subscriber.py`) menambah `program_studi_id` pada event `dashboard:logs`. Teks `Student.program_studi` dicocokkan ke id/kode/nama prodi, termasuk substring, sama dengan `resolve_programs`. Event tanpa field tetap sah untuk publisher lama. Bukan filter RBAC di server; klien yang membuang event di luar filter.
+
+Cek: `py_compile` file terkait lulus. `stream_program_ids` pada SQLite memori: `"Teknik Informatika"` → prodi `Informatika`. Bukan `backend_regression_check` penuh. Login NIM tetap case-sensitive.
+
+**Deploy 2026-11-16:** image `monitorung-api:latest` `sha256:bc620d29229d…` pada api, worker, scheduler, subscriber. Rollback `monitorung-api:rollback-20261116`. Backup UpCloud `/opt/monitorung/releases/20261116-filter/upcloud.dump` (477239 byte). Postgres/redis/mqtt tidak direstart. Probe publik status 200, auth tanpa sesi 401. Login nyata belum diuji ulang.
 
 ## Batas dan pemeliharaan memory
 
 Sumber utama: file pada tabel kepemilikan, `requirements.txt`, `Dockerfile`, `../docker-compose.yml`. `README.md`, `DEPLOYMENT.md`, dan `CLAUDE.md` membantu konteks historis tetapi memuat detail usang. Memory ini tidak menyatakan API, broker, DB, worker, training atau AI sudah diuji berjalan. Perbarui bagian terkait setiap kali kontrak, role, versi, agregasi atau alur berubah.
+
+## Perbaikan jadwal/mata kuliah kosong untuk mahasiswa (2026-11-16)
+
+`students.program_studi` adalah teks bebas yang bisa basi (`"Weerr"`, kosong), sehingga `sync_master_schedules()` dan `resolve_programs()` role mahasiswa menghasilkan daftar kosong walau admin sudah membuat mata kuliah dan jadwal. Keduanya sekarang mencoba nilai itu lebih dulu lalu jatuh ke `users.jurusan` bila tidak cocok dengan prodi aktif mana pun; `academic_scope` memakai pencocokan yang sama untuk scope baca. Cek: skrip SQLite lokal berasert (prodi basi + jurusan `PTI`/`Sistem Informasi`) lulus, `py_compile` lulus. Belum dideploy; image VPS masih memuat kode lama.

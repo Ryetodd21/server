@@ -38,13 +38,19 @@ async def resolve_programs(db, payload, jurusan_id=None, program_studi_id=None):
         matching.discard(None)
         programs = [p for p in programs if p.jurusan_id in matching] if matching else []
     elif role == "mahasiswa":
-        affiliation = (await db.execute(select(Student.program_studi).where(
-            Student.user_id == payload["sub"]))).scalar_one_or_none()
-        affiliation = (affiliation or payload.get("jurusan") or "").strip().casefold()
-        programs = [p for p in programs if affiliation and (
-            affiliation in {p.id.casefold(), p.code.casefold(), p.name.casefold()}
-            or affiliation in p.name.casefold() or p.name.casefold() in affiliation
-        )]
+        # students.program_studi is admin free text and can be stale ("Weerr",
+        # empty), which silently hid every course and schedule. Try it first,
+        # then the user's own affiliation.
+        raw = [(await db.execute(select(Student.program_studi).where(
+            Student.user_id == payload["sub"]))).scalar_one_or_none(),
+               payload.get("jurusan")]
+        def _match(value):
+            a = (value or "").strip().casefold()
+            return [p for p in programs if a and (
+                a in {p.id.casefold(), p.code.casefold(), p.name.casefold()}
+                or a in p.name.casefold() or p.name.casefold() in a
+            )]
+        programs = next((m for m in (_match(v) for v in raw) if m), [])
     elif role != "admin":
         programs = []
     if jurusan_id:
@@ -144,6 +150,28 @@ async def configure_request_scope(db, request):
         jurusan_id = program_id = None
     programs = await resolve_programs(db, payload, jurusan_id, program_id)
     install_scope(db, programs, payload)
+
+
+async def stream_program_ids(db, student_ids: list[str]) -> dict[str, str | None]:
+    """Map student id to ProgramStudi.id for live events. Name match follows resolve_programs."""
+    if not student_ids:
+        return {}
+    students = (await db.execute(
+        select(Student.id, Student.program_studi).where(Student.id.in_(student_ids))
+    )).all()
+    programs = (await db.execute(select(ProgramStudi))).scalars().all()
+    out: dict[str, str | None] = {}
+    for student_id, raw in students:
+        text = (raw or "").strip().casefold()
+        match = next((
+            p for p in programs
+            if text and (
+                text in {p.id.casefold(), p.code.casefold(), p.name.casefold()}
+                or text in p.name.casefold() or p.name.casefold() in text
+            )
+        ), None)
+        out[student_id] = match.id if match else None
+    return out
 
 
 async def scoped_distribution(db, model_id):

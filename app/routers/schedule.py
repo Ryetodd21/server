@@ -23,14 +23,32 @@ def master_schedule_id(student_id: str, slot_id: str) -> str:
 async def sync_master_schedules(db: AsyncSession, student: Student):
     from app.models.jadwal_mata_kuliah import JadwalMataKuliah
     from app.models.mata_kuliah import MataKuliah
-    from app.models.program_studi import ProgramStudi
     from sqlalchemy.dialects.postgresql import insert as pg_insert
     from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-    if not student.program_studi and student.user_id:
+    # student.program_studi is admin-typed free text and often stale ("Weerr"),
+    # so fall back to the user's own affiliation when it matches no prodi.
+    from app.models.program_studi import ProgramStudi
+
+    candidates = [(student.program_studi or "").strip()]
+    if student.user_id:
         user_jurusan = (await db.execute(select(User.jurusan).where(User.id == student.user_id))).scalar_one_or_none()
         if user_jurusan:
-            student.program_studi = user_jurusan
+            if not candidates[0]:
+                student.program_studi = user_jurusan
+            candidates.append(user_jurusan.strip())
+    all_programs = (await db.execute(
+        select(ProgramStudi).where(ProgramStudi.is_active.is_(True))
+    )).scalars().all()
+
+    def _matches(value: str) -> bool:
+        v = value.casefold()
+        return bool(v) and any(
+            v in {p.id.casefold(), p.code.casefold(), p.name.casefold()} or v in p.name.casefold()
+            for p in all_programs
+        )
+
+    prodi_val = next((c for c in candidates if _matches(c)), candidates[0])
 
     # UUIDv5 keeps one stable schedule per student/slot, including concurrent fetches.
     # Existing UUIDv4 personal schedules and historical log references are retained.
@@ -40,7 +58,6 @@ async def sync_master_schedules(db: AsyncSession, student: Student):
     manual_keys = {(s.subject_id, s.day_of_week, s.start_time, s.end_time)
                    for s in existing if s.id not in managed_ids and s.is_active}
 
-    prodi_val = (student.program_studi or "").strip()
     prodi_cond = or_(
         func.lower(ProgramStudi.name) == prodi_val.lower(),
         func.lower(ProgramStudi.code) == prodi_val.lower(),
