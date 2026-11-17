@@ -80,7 +80,11 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down...")
     from app.cache_pubsub import stop_subscriber
-    stop_subscriber()
+    await stop_subscriber()
+    # Lepas pool koneksi DB saat shutdown supaya worker yang di-recycle
+    # uvicorn (--limit-max-requests) tidak menahan koneksi PostgreSQL.
+    from app.database import dispose_engines
+    await dispose_engines()
 
 
 app = FastAPI(

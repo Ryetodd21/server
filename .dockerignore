@@ -21,6 +21,10 @@ env/
 dev.db
 monitor.db
 
+# Mosquitto config + password file — dipakai container mqtt lewat bind mount,
+# bukan bagian image API. Juga berisi hash password (mode 600).
+mosquitto/
+
 # Tests
 .pytest_cache/
 .coverage

@@ -93,6 +93,7 @@ def acquire_train_lock(timeout: float = _DEFAULT_TIMEOUT_SEC):
     finally:
         if acquired:
             _release_sync(client, _LOCK_KEY)
+        client.close()
 
 
 def is_train_lock_held() -> bool:
@@ -101,9 +102,11 @@ def is_train_lock_held() -> bool:
     Used by the scheduler cron / admin endpoints to detect contention
     before kicking off a heavy training run.
     """
+    client = _redis_client()
     try:
-        client = _redis_client()
         return bool(client.exists(_LOCK_KEY))
     except Exception as e:
         logger.warning("train_lock: exists check failed: %s", e)
         return False
+    finally:
+        client.close()

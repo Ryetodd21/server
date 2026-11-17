@@ -25,6 +25,7 @@ worker and a long-lived subscriber that runs as an asyncio task in
 the API process lifespan.
 """
 import asyncio
+import contextlib
 import json
 import logging
 from typing import Optional
@@ -134,6 +135,7 @@ async def _subscriber_loop() -> None:
             # but the channel is irrelevant in-process anyway.
             await asyncio.sleep(60)
             continue
+        pubsub = None
         try:
             pubsub = r.pubsub()
             await pubsub.subscribe(CHANNEL_MODEL_INVALIDATE)
@@ -166,6 +168,18 @@ async def _subscriber_loop() -> None:
             )
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30.0)
+        finally:
+            # Tutup pubsub tiap reconnect; tanpa ini objek + socket lama
+            # menumpuk di memori selama proses API hidup.
+            if pubsub is not None:
+                try:
+                    await pubsub.unsubscribe(CHANNEL_MODEL_INVALIDATE)
+                except Exception:
+                    pass
+                try:
+                    await pubsub.aclose()
+                except Exception:
+                    pass
 
 
 def start_subscriber() -> None:
@@ -190,10 +204,21 @@ def start_subscriber() -> None:
     _subscriber_task = loop.create_task(_subscriber_loop())
 
 
-def stop_subscriber() -> None:
-    """Cancel the subscriber task. Called from lifespan shutdown."""
-    global _subscriber_task
-    if _subscriber_task is None:
-        return
-    _subscriber_task.cancel()
-    _subscriber_task = None
+async def stop_subscriber() -> None:
+    """Cancel the subscriber task and close the Redis client.
+
+    Called from lifespan shutdown. The singleton client is per-process
+    (one per API worker), so closing it here is safe.
+    """
+    global _subscriber_task, _redis
+    if _subscriber_task is not None:
+        _subscriber_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _subscriber_task
+        _subscriber_task = None
+    if _redis is not None:
+        try:
+            await _redis.aclose()
+        except Exception:
+            pass
+        _redis = None

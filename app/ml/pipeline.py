@@ -2,6 +2,7 @@
 PCA + K-Means Pipeline — dijalankan setiap malam pukul 23.00 WITA.
 Menggunakan seluruh dataset kumulatif (historis + hari berjalan).
 """
+import gc
 import json
 import pickle
 import base64
@@ -114,6 +115,12 @@ def build_feature_dataframe(session: Session) -> pd.DataFrame:
     else:
         pivot["campus_duration"] = 0
         pivot["schedule_match_rate"] = 0
+    # DataFrame mentah per-baris bisa jauh lebih besar dari pivot; lepas
+    # sebelum return supaya training malam tidak menahan dua salinan.
+    del df, log_rows
+    if loc_rows:
+        del loc_df, agg_loc
+    del loc_rows
     return pivot
 
 
@@ -160,6 +167,7 @@ def train_pipeline(
     X = df[feature_cols].values
     student_ids = df["student_id"].values
     dates = pd.to_datetime(df["date"]).values
+    del df
 
     # KMeans requires at least k_n samples and at least k_n unique data points
     if len(X) < k_n:
@@ -252,15 +260,18 @@ def train_pipeline(
             "features": row_dict,
         })
 
+    # Lepas salinan DataFrame/array besar sebelum worker kembali idle.
+    sizes = {"dataset_size": len(X), "train_size": len(X_train), "test_size": len(X_test)}
+    del X, X_train, X_test, X_train_pca, X_test_pca, X_all_scaled, X_all_pca
+    gc.collect()
+
     return {
         "pca_data": pca_data,
         "kmeans_data": kmeans_data,
         "scaler_data": scaler_data,
         "pca_n_components": actual_pca_n,
         "kmeans_n_clusters": k_n,
-        "dataset_size": len(X),
-        "train_size": len(X_train),
-        "test_size": len(X_test),
+        **sizes,
         "inertia": float(kmeans.inertia_),
         "silhouette_score": sil_score,
         "cluster_distribution": cluster_dist,

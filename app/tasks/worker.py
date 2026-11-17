@@ -43,7 +43,7 @@ else:
 
 
 from app.ml.pipeline import train_pipeline
-from sqlalchemy import create_engine
+from app.database import get_sync_engine
 from sqlalchemy.orm import Session
 
 
@@ -55,8 +55,7 @@ def cutoff_data_task() -> dict:
     from app.models.app_log import AppLog
     from app.models.location_log import LocationLog
 
-    engine = create_engine(settings.DATABASE_SYNC_URL)
-    with Session(engine) as session:
+    with Session(get_sync_engine()) as session:
         from datetime import datetime as _dt, timedelta as _td
         from app.timezone import WITA
 
@@ -154,8 +153,7 @@ def train_model_task() -> dict:
 
 def _train_model_task_impl() -> dict:
 
-    engine = create_engine(settings.DATABASE_SYNC_URL)
-    with Session(engine) as session:
+    with Session(get_sync_engine()) as session:
         # Get next version number
         last_version = session.query(ModelVersion).order_by(
             ModelVersion.version_number.desc()
@@ -302,9 +300,7 @@ def _train_model_task_impl() -> dict:
             # container from the api — broker access goes via mqtt_bridge →
             # Redis mqtt:relay → subscriber.
             try:
-                import asyncio
-                from app.mqtt_bridge import broadcast_dashboard
-                asyncio.run(broadcast_dashboard(
+                _run_bridge_sync(
                     "training_completed",
                     {
                         "model_version_id": mv.id,
@@ -312,7 +308,7 @@ def _train_model_task_impl() -> dict:
                         "cluster_count": result["kmeans_n_clusters"],
                         "dataset_size": result["dataset_size"],
                     },
-                ))
+                )
             except Exception:
                 logging.getLogger("monitor").exception(
                     "[worker] training MQTT broadcast failed (model_version=%s)",
@@ -385,15 +381,40 @@ def publish_model_invalidate_sync(
     """
     import asyncio
     from app.cache_pubsub import publish_model_invalidate
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    from app import cache_pubsub
+
+    async def _publish():
         try:
-            loop.run_until_complete(
-                publish_model_invalidate(model_version_id, reason)
-            )
+            await publish_model_invalidate(model_version_id, reason)
         finally:
-            loop.close()
-    except Exception:
-        # Re-raise so the caller's try/except sees it.
-        raise
+            # Client singleton terikat ke loop ini. Tanpa reset, job
+            # berikutnya di proses worker yang sama memakai client dari
+            # loop yang sudah tertutup.
+            r, cache_pubsub._redis = cache_pubsub._redis, None
+            if r is not None:
+                await r.aclose()
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(_publish())
+    finally:
+        loop.close()
+
+
+def _run_bridge_sync(event: str, data: dict) -> None:
+    """`broadcast_dashboard` dari RQ worker (sync) tanpa memakai client
+    Redis dari event loop yang sudah tertutup."""
+    import asyncio
+    from app.mqtt_bridge import broadcast_dashboard
+    from app import mqtt_bridge
+
+    async def _run():
+        try:
+            await broadcast_dashboard(event, data)
+        finally:
+            r, mqtt_bridge._redis = mqtt_bridge._redis, None
+            if r is not None:
+                await r.aclose()
+
+    asyncio.run(_run())

@@ -58,7 +58,9 @@ Sumber otorisasi, data akademik, log mahasiswa, model distraksi, laporan, dan ko
 
 - `POST /api/logs/batch` menerima log + lokasi dengan `client_id`/`idempotency_key`, mengembalikan `synced_client_ids`. Konflik → 409 tanpa ACK agar seluruh batch di-retry; lokasi yang sudah tersimpan tetap diakui.
 - MQTT memakai envelope HMAC per sesi: `monitorung-mqtt-v1\n{topic}\n{sent_at}\n{payload}`, kunci refresh token. Pesan tanpa signature, sesi dicabut, atau selisih jam >300 detik ditolak.
+- Ingest MQTT: `asyncio.Queue(maxsize=1000)` + 15 worker tetap; thread paho diblokir maks 5 detik saat backlog penuh (PUBACK baru dikirim setelah `on_message`, jadi broker retry). Log `MQTT backlog penuh` = ingest macet, bukan pesan hilang normal.
 - Redis pub/sub `dashboard:logs` → WebSocket `/api/logs/stream/ws`. Stream hanya admin/dosen; validasi ulang sebelum tiap event. Event membawa `program_studi_id` untuk filter klien.
+- WebSocket memakai `pubsub.get_message(timeout=30)` + `{"event":"ping"}` tiap 30 detik (deteksi klien half-open). Klien Redis singleton per proses (`_make_redis()` di `routers/logs.py`); yang ditutup hanya `pubsub`, bukan client.
 - `/api/config/campus` memberi konfigurasi kampus/geofence dan alamat MQTT ke Android.
 
 ## Akademik dan jadwal
@@ -85,6 +87,7 @@ Hierarki: **Fakultas → Jurusan → ProgramStudi → MataKuliah → JadwalMataK
 4. Label dipetakan dari urutan rata-rata screen time; ID klaster mentah tidak bermakna risiko tetap.
 5. `serving.py` harus memakai urutan fitur, transformasi, label, dan versi yang konsisten dengan trainer. Artefak pickle hanya dari sumber internal.
 6. Hasil di `ClusterResult`; invalidasi cache Redis setelah training/pergantian model.
+7. `_model_cache` di `serving.py` adalah LRU maks 2 entri; `train_pipeline` melepas DataFrame/array sementara + `gc.collect()` sebelum kembali.
 
 Rumus skor di `ml/score.py`, terpisah dari assignment KMeans. Default: screen time cap 480 menit bobot 0.35; sosmed+game cap 240 bobot 0.25; unlock cap 10 bobot 0.20; fraksi penggunaan dalam kelas 0.10; penalti kecocokan jadwal <0.5 sebesar 0.10. Hasil dibatasi 1, dibulatkan 3 desimal. Jangan duplikasi rumus di UI.
 
@@ -126,6 +129,9 @@ Untuk kontrak baru, tambah satu regression check terfokus pada input/otorisasi/d
 - DB UpCloud remote (~1,5 ms/round-trip): jumlah query lebih menentukan daripada CPU. `GET /api/schedules` turun dari 96,4 ms/53 query ke 18,4 ms/12 query lewat UPSERT batch + tulis hanya saat berubah.
 - `get_db()` → `configure_request_scope()` sudah mengautentikasi; payload dibagikan lewat `request.state.auth_payload` agar route tidak autentikasi dua kali. **Jangan memoize hasil `get_current_user()`**: regression test menonaktifkan akun pada objek `Request` yang sama dan harus tetap 401.
 - Index di `_INDEX_DEFINITIONS` (`database.py`), dibuat idempoten saat startup: `location_logs.idempotency_key`, `location_logs(student_id, timestamp)`, `app_logs.idempotency_key`, `cluster_results(model_version_id, result_date)`.
+- Opsi pool DB dipusatkan di `pool_kwargs(url, size)` (`database.py`) dan dipakai oleh `engine`, `get_sync_engine()`, `mqtt_subscriber.engine`, serta `mqtt_client_stub.make_sync_engine()`. SQLite (StaticPool) menolak `pool_size`/`max_overflow`, jadi helper mengembalikan `{}` untuk SQLite dan `pool_size`/`max_overflow`/`pool_recycle=1800`/`pool_pre_ping` untuk PostgreSQL. Jangan duplikasi dict pool di tempat lain.
+- `dispose_engines()` dipanggil di shutdown lifespan supaya worker yang di-recycle `--limit-max-requests` tidak menahan koneksi PostgreSQL.
+- Production menjalankan uvicorn 2 worker + `--limit-max-requests 1500 --timeout-graceful-shutdown 30`; jangan kembalikan gunicorn/UvicornWorker (race notify vs timeout membunuh worker sehat).
 
 ## Production
 
@@ -136,7 +142,7 @@ Database **Managed PostgreSQL UpCloud 18.7** (`defaultdb`) via private network. 
 
 Deploy: build → `docker save | gzip | ssh | docker load` → `up -d --no-deps --wait api worker scheduler subscriber web`. **Tidak ada backup tersisa** (dihapus 2026-11-17); rollback hanya lewat rebuild.
 
-Status 2026-11-17: `monitorung-api:latest` `sha256:2f22741ace64…`. Tujuh layanan healthy. Data akademik production dikosongkan agar dibangun ulang manual; users, students, campuses, app_logs, location_logs, cluster_results, model_versions dipertahankan.
+Status 2026-11-17 (deploy optimalisasi RAM): `monitorung-api:latest` `sha256:9ffed70fc405…`. Rollback tag di VPS: `monitorung-api:rollback` `sha256:2f22741ace64…` (+ `docker-compose.yml.pre-opt`, `.env.production.pre-opt` di `/opt/monitorung`). Tujuh layanan healthy; `UVICORN_WORKERS` VPS diturunkan 4 → 2 (env menimpa default compose). Batas RAM aktif: api 1536m, worker 1024m, web 768m, scheduler 320m, subscriber 384m. api pasca-deploy ~357 MiB / 26 PIDs. Data akademik production dikosongkan agar dibangun ulang manual; users, students, campuses, app_logs, location_logs, cluster_results, model_versions dipertahankan.
 
 ## Batas memory
 

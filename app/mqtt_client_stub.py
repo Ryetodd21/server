@@ -17,32 +17,29 @@ import json
 import random
 import threading
 import time
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.database import pool_kwargs
+from app.models.student import Student
+from app.models.user import Token
+
 settings = get_settings()
 
 _mqtt_broker = settings.MQTT_BROKER_URL
 _broker_host = _mqtt_broker.replace("tcp://", "").split(":")[0]
 _broker_port = int(_mqtt_broker.split(":")[-1]) if ":" in _mqtt_broker else 1883
-import uuid
-from datetime import datetime, timedelta, timezone
-
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
-
-from app.config import get_settings
-from app.models.student import Student
-from app.models.user import Token
-
-settings = get_settings()
-engine_async = create_async_engine(settings.DATABASE_URL, echo=False)
-async_session_maker = async_sessionmaker(engine_async, class_=AsyncSession, expire_on_commit=False)
 
 
 def make_sync_engine():
-    return create_engine(settings.DATABASE_SYNC_URL)
+    # Opsi pool sama dengan engine aplikasi; tanpa recycle/pre_ping koneksi
+    # simulasi menumpuk di DB remote.
+    return create_engine(
+        settings.DATABASE_SYNC_URL, **pool_kwargs(settings.DATABASE_SYNC_URL, size=2)
+    )
 
 
 def get_student_ids() -> list[str]:
@@ -134,18 +131,9 @@ def send_location_log(client, student_id: str, student_nim: str):
     print(f"  {campus_icon} [{student_nim}] Location: {'on campus' if is_on_campus else 'off campus'}")
 
 
-async def simulate_student(client, student_id: str, student_nim: str, interval: int, total: int):
-    for i in range(total):
-        await send_app_log(client, student_id, student_nim)
-        await asyncio.sleep(0.3)  # small delay between logs
-        await send_location_log(client, student_id, student_nim)
-        if i < total - 1:
-            await asyncio.sleep(interval)
-
 
 def run_simulation(students_count: int, interval: int, total: int):
     import paho.mqtt.client as mqtt
-    import threading
 
     student_records = get_student_ids()
     if not student_records:

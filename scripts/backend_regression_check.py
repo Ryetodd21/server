@@ -324,12 +324,17 @@ async def check_log_stream():
         async def unsubscribe(self, channel):
             pass
 
-        async def listen(self):
-            yield {"type": "message", "data": "allowed-event"}
+        async def aclose(self):
+            pass
+
+        async def get_message(self, ignore_subscribe_messages=False, timeout=0.0):
+            self.calls = getattr(self, "calls", 0) + 1
+            if self.calls == 1:
+                return {"type": "message", "data": "allowed-event"}
             async with sessions() as db:
                 await db.execute(update(User).where(User.id == "user-one").values(role="mahasiswa"))
                 await db.commit()
-            yield {"type": "message", "data": "must-not-leak"}
+            return {"type": "message", "data": "must-not-leak"}
 
     class Redis:
         def pubsub(self):
@@ -427,6 +432,89 @@ async def check_scheduler():
     print("PASS scheduler retries failed enqueues without duplicating successful ones")
 
 
+async def check_memory_guards():
+    from app.ml import serving
+    from app import limiter as limiter_mod
+
+    # LRU model cache: bounded at MAX_CACHED_MODELS, oldest evicted first.
+    saved = dict(serving._model_cache)
+    try:
+        serving._model_cache.clear()
+        for i in range(serving.MAX_CACHED_MODELS + 2):
+            serving._model_cache[f"m{i}"] = object()
+            while len(serving._model_cache) > serving.MAX_CACHED_MODELS:
+                serving._model_cache.popitem(last=False)
+        assert len(serving._model_cache) == serving.MAX_CACHED_MODELS
+        assert "m0" not in serving._model_cache
+    finally:
+        serving._model_cache.clear()
+        serving._model_cache.update(saved)
+
+    # Rate limiter: memory:// in dev, Redis URL in prod.
+    assert type(limiter_mod.limiter._storage).__name__ == "MemoryStorage"
+    assert limiter_mod.limiter._storage_uri is None
+    prod_limiter = limiter_mod.build_limiter(
+        settings.model_copy(update={"USE_FAKEREDIS": False, "REDIS_URL": "redis://redis:6379/0"})
+    )
+    assert prod_limiter._storage_uri == "redis://redis:6379/0"
+    assert type(prod_limiter._storage).__name__ == "RedisStorage"
+
+    # Pool kwargs: SQLite rejects pool_size/max_overflow, PostgreSQL gets them.
+    from app.database import pool_kwargs, get_sync_engine
+    assert pool_kwargs("sqlite+aiosqlite:///:memory:") == {}
+    assert pool_kwargs("postgresql+asyncpg://u:p@h/db", size=3) == {
+        "pool_size": 3, "max_overflow": 3, "pool_recycle": 1800, "pool_pre_ping": True,
+    }
+    sync_engine = get_sync_engine()
+    assert sync_engine.url.get_backend_name() == "sqlite"
+    print("PASS bounded model cache, rate-limit storage and pool kwargs selection")
+
+async def check_pubsub_cleanup():
+    """Subscriber must close each pubsub before reconnecting."""
+    from app import cache_pubsub
+
+    closed = []
+
+    class PubSub:
+        async def subscribe(self, channel):
+            pass
+
+        async def unsubscribe(self, channel):
+            pass
+
+        async def aclose(self):
+            closed.append(True)
+
+        async def listen(self):
+            yield {"type": "subscribe", "data": None}
+            raise ConnectionError("drop")
+
+    class Redis:
+        def pubsub(self):
+            return PubSub()
+
+    async def no_sleep(_):
+        if len(closed) >= 2:
+            raise asyncio.CancelledError
+
+    with patch.object(cache_pubsub, "_get_redis", lambda: Redis()), \
+         patch.object(cache_pubsub.asyncio, "sleep", no_sleep):
+        try:
+            await cache_pubsub._subscriber_loop()
+        except asyncio.CancelledError:
+            pass
+    assert len(closed) >= 2, closed
+    print("PASS pubsub client closed on every reconnect")
+
+async def check_mqtt_backpressure():
+    """Gate must block the paho thread when the queue is full, not drop."""
+    gate = mqtt_subscriber.IngestGate(limit=2)
+    assert gate.acquire(timeout=0) and gate.acquire(timeout=0)
+    assert gate.acquire(timeout=0) is False          # full -> caller blocks
+    gate.release()
+    assert gate.acquire(timeout=0) is True           # slot reused after release
+    print("PASS MQTT ingest gate blocks instead of silently dropping")
+
 async def run_checks():
     async with engine.begin() as db:
         await db.run_sync(Base.metadata.create_all)
@@ -448,6 +536,9 @@ async def run_checks():
         await check_log_stream()
         await check_scheduler()
         await check_public_registration_and_report_scores()
+        await check_memory_guards()
+        await check_pubsub_cleanup()
+        await check_mqtt_backpressure()
     finally:
         await engine.dispose()
         await mqtt_subscriber.engine.dispose()

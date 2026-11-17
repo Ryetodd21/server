@@ -34,6 +34,7 @@ import json
 import logging
 import pickle
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Optional
@@ -71,10 +72,10 @@ FEATURE_COLUMNS = [
 # In-process dict keyed by model_version_id. Populated on first
 # `load_active_model` / `load_model`, invalidated by
 # `invalidate_model_cache` (called by the trainer on success/failure).
-# Ponytail: no Redis cache, no LRU eviction — a typical deployment has
-# one active model at a time, and the model objects are small (~1MB
-# pickled). If we ever serve multiple models, switch to LRU.
-_model_cache: dict[str, "LoadedModel"] = {}
+# LRU terbatas: satu model aktif normalnya, tapi invalidasi yang terlewat
+# (Redis putus) dulu menahan model lama selamanya di memori worker.
+MAX_CACHED_MODELS = 2
+_model_cache: "OrderedDict[str, LoadedModel]" = OrderedDict()
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,7 @@ def load_model(db_sync: Session, model_version_id: str) -> LoadedModel:
     serve the previous model.
     """
     if model_version_id in _model_cache:
+        _model_cache.move_to_end(model_version_id)
         return _model_cache[model_version_id]
 
     from app.models.model_version import ModelVersion
@@ -157,6 +159,10 @@ def load_model(db_sync: Session, model_version_id: str) -> LoadedModel:
         version_number=mv.version_number,
     )
     _model_cache[model_version_id] = loaded
+    _model_cache.move_to_end(model_version_id)
+    while len(_model_cache) > MAX_CACHED_MODELS:
+        evicted_id, _ = _model_cache.popitem(last=False)
+        logger.info("Evicted cached model id=%s (LRU)", evicted_id)
     logger.info(
         "Loaded model version_id=%s version_number=%s features=%s",
         mv.id,

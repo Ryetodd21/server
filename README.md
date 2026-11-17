@@ -15,7 +15,7 @@ Android App  →  FastAPI Server  →  Redis Queue  →  PostgreSQL
 
 ## Prasyarat
 
-- Python 3.11+
+- Python 3.13 (sama dengan `Dockerfile`; 3.14 belum didukung SQLAlchemy 2.0.35)
 - PostgreSQL 14+
 - Redis 6+
 
@@ -61,7 +61,7 @@ sudo systemctl start redis-server   # Linux
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 # Terminal 2: RQ Worker
-rq worker monitoring-worker
+rq worker monitoring --url redis://localhost:6379/0
 
 # Terminal 3: Scheduler (optional — bisa juga pakai cron)
 python -m app.schedules.scheduler
@@ -70,11 +70,17 @@ python -m app.schedules.scheduler
 **Mode production:**
 
 ```bash
-# Gunicorn + Uvicorn workers
-gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+# Uvicorn multi-worker + daur ulang proses.
+# Jangan pakai gunicorn/UvicornWorker: worker hanya notify tiap `timeout`
+# detik sementara arbiter membunuh bila last_update > timeout, sehingga
+# worker sehat bisa kena SIGABRT berkala. Uvicorn 0.32 sudah punya
+# --limit-max-requests dan supervisornya memegang listening socket.
+uvicorn app.main:app --host 0.0.0.0 --port 8000 \
+  --workers 2 --proxy-headers --forwarded-allow-ips='*' \
+  --limit-max-requests 1500 --timeout-graceful-shutdown 30
 
 # RQ Worker (jalankan di proses terpisah)
-rq worker monitoring-worker &
+rq worker monitoring --url redis://localhost:6379/0 &
 
 # Scheduler
 python -m app.schedules.scheduler &
@@ -102,7 +108,7 @@ python -m app.schedules.scheduler &
 - **Cut-off**: Setiap hari 22:00 WITA — data ditandai siap training
 - **Training**: Setiap hari 23:00 WITA — PCA + K-Means dijalankan
 - **Features**: screen time, sosmed/game time, unlock count, used during class, campus location
-- **Output**: Cluster label (0=Rendah, 1=Sedang, 2=Tinggi), distraction score (0.0–1.0), PCA coordinates
+- **Output**: label klaster dinamis dari versi model (`cluster_labels`), distraction score (0.0–1.0), PCA coordinates. Nomor klaster bukan urutan risiko — jangan anggap `0` selalu rendah.
 
 ## Struktur
 

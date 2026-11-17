@@ -12,6 +12,7 @@ import json
 import logging
 import signal
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -66,6 +67,25 @@ def _parse_datetime(value: str | None) -> datetime:
 # Healthcheck verifies the file exists and was modified in the last 60s.
 _HEARTBEAT_FILE = Path("/tmp/mqtt_subscriber_heartbeat")
 
+# Batas backlog ingest MQTT (pesan tertunda). Lebih besar = toleransi burst
+# lebih panjang, lebih kecil = memori lebih ketat.
+QUEUE_MAX = 1000
+# Berapa lama thread jaringan paho boleh diblokir saat backlog penuh.
+QUEUE_BLOCK_SEC = 5
+
+class IngestGate:
+    """Backpressure untuk thread paho: slot diambil sebelum pesan diantrekan,
+    dikembalikan worker setelah pesan selesai diproses."""
+
+    def __init__(self, limit: int = QUEUE_MAX):
+        self._sem = threading.Semaphore(limit)
+
+    def acquire(self, timeout: float = QUEUE_BLOCK_SEC) -> bool:
+        return self._sem.acquire(timeout=timeout)
+
+    def release(self) -> None:
+        self._sem.release()
+
 # Module-level handle so local tests / status probes can introspect.
 # for tests that import this module in-process.
 import paho.mqtt.client as _paho_mqtt  # noqa: E402
@@ -81,6 +101,7 @@ import redis.asyncio as redis_async
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.config import get_settings
+from app.database import pool_kwargs
 from app.models.app_log import AppLog
 from app.models.location_log import LocationLog
 from app.models.student import Student
@@ -92,7 +113,11 @@ logger = logging.getLogger("mqtt_subscriber")
 
 # ─── Async DB session ─────────────────────────────────────────────────────────
 
-engine = create_async_engine(settings.DATABASE_URL, echo=False)
+# SQLite (aiosqlite/StaticPool) menolak pool_size/max_overflow — opsi pool
+# hanya untuk PostgreSQL remote (UpCloud).
+engine = create_async_engine(
+    settings.DATABASE_URL, echo=False, **pool_kwargs(settings.DATABASE_URL, size=3)
+)
 async_session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -333,19 +358,39 @@ async def start_subscriber():
         else:
             logger.error(f"Connection failed, rc={rc}")
 
+    # Bounded queue + worker tetap: burst reconnect Android tidak lagi
+    # membuat coroutine tak terbatas (tiap satu = sesi DB paralel).
+    # Saat penuh, thread jaringan paho DIBLOKIR (bukan pesan dibuang):
+    # paho mengirim PUBACK setelah on_message, jadi broker akan retry
+    # dan tidak ada data yang hilang — hanya ingest yang melambat.
+    msg_queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_MAX)
+    pending = IngestGate()
+
+    def _enqueue(item) -> None:
+        msg_queue.put_nowait(item)
+
     def on_message(client, userdata, msg: _paho_mqtt.MQTTMessage, properties=None):
         # paho's network thread doesn't have a running asyncio loop, so we
         # cannot use asyncio.create_task() here. Instead, schedule the
-        # coroutine on the running loop via call_soon_threadsafe (the loop
-        # is captured in the enclosing closure via _loop below).
+        # enqueue on the running loop via call_soon_threadsafe.
+        # Blokir maks 5s supaya thread jaringan paho tetap mengirim keepalive
+        # (keepalive=60). Timeout hanya tercapai kalau ingest benar-benar macet.
+        if not pending.acquire():
+            logger.error(
+                "MQTT backlog penuh %ss, pesan %s dibuang",
+                QUEUE_BLOCK_SEC, msg.topic,
+            )
+            return
         try:
             payload = json.loads(msg.payload.decode("utf-8"))
-            _loop.call_soon_threadsafe(
-                asyncio.ensure_future, on_message_async(msg.topic, payload)
-            )
         except json.JSONDecodeError as e:
+            pending.release()
             logger.error(f"Invalid JSON from {msg.topic}: {e}")
+            return
+        try:
+            _loop.call_soon_threadsafe(_enqueue, (msg.topic, payload))
         except Exception as e:
+            pending.release()
             logger.error(f"on_message dispatch failed: {e}", exc_info=True)
 
     async def on_message_async(topic: str, payload: dict):
@@ -430,6 +475,16 @@ async def start_subscriber():
             await pubsub.unsubscribe("mqtt:relay")
             await pubsub.close()
 
+    async def queue_worker():
+        while True:
+            topic, payload = await msg_queue.get()
+            try:
+                await on_message_async(topic, payload)
+            finally:
+                msg_queue.task_done()
+                pending.release()
+
+    worker_tasks = [asyncio.create_task(queue_worker()) for _ in range(15)]
     relay_task = asyncio.create_task(redis_relay_loop())
 
     try:
@@ -449,8 +504,12 @@ async def start_subscriber():
         client.loop_stop()
         client.disconnect()
         mqtt_client = None
+        for t in worker_tasks + [relay_task]:
+            t.cancel()
+        await asyncio.gather(*worker_tasks, relay_task, return_exceptions=True)
         if redis:
             await redis.aclose()
+        await engine.dispose()
 
 
 def main():

@@ -1,11 +1,9 @@
 import uuid
 import json
-import asyncio
 import logging
 import math
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, Request
-from fastapi.responses import StreamingResponse, Response, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, literal_column, and_, String, cast, Date
 from sqlalchemy.exc import IntegrityError
@@ -18,8 +16,8 @@ from app.models.user import User
 from app.models.mata_kuliah import MataKuliah
 from app.models.schedule import Schedule
 from app.models.campus import Campus
-from app.schemas.log import BatchLogRequest, SyncStatusResponse, AppLogItem, LocationLogItem
-from app.routers.auth import get_current_user, get_current_user_id
+from app.schemas.log import BatchLogRequest, SyncStatusResponse
+from app.routers.auth import get_current_user
 from app.config import get_settings
 from app.limiter import limiter
 
@@ -182,11 +180,6 @@ async def _broadcast_new_logs(
                 "[logs/batch] Redis dashboard:logs broadcast failed for student=%s",
                 student_id,
             )
-        finally:
-            try:
-                await redis_client.aclose()
-            except Exception:
-                pass
     else:
         logger.warning(
             "[_broadcast_new_logs] redis_client is None — publish skipped"
@@ -210,12 +203,24 @@ async def _broadcast_new_logs(
         )
 
 
+_redis_client = None
+
 def _make_redis():
+    """Lazy singleton per worker process.
+
+    Sebelumnya dipanggil tiap batch & tiap WebSocket, jadi satu
+    ConnectionPool baru dialokasikan per panggilan. Singleton ini dipakai
+    bersama; pemanggil hanya menutup pubsub-nya sendiri, bukan client.
+    """
+    global _redis_client
     if settings.USE_FAKEREDIS:
+        # fakeredis terikat ke event loop pembuatnya; jangan di-cache.
         import fakeredis.aioredis
         return fakeredis.aioredis.FakeRedis()
-    import redis.asyncio as redis_async
-    return redis_async.from_url(settings.REDIS_URL)
+    if _redis_client is None:
+        import redis.asyncio as redis_async
+        _redis_client = redis_async.from_url(settings.REDIS_URL, max_connections=20)
+    return _redis_client
 
 
 async def get_student_id(request: Request, db: AsyncSession = Depends(get_db)) -> str:
@@ -964,16 +969,24 @@ async def logs_stream_ws(websocket: WebSocket):
             return
 
         try:
-            async for message in pubsub.listen():
-                if message["type"] == "message":
-                    try:
-                        payload = await authenticate_access_token(raw_token)
-                        if payload.get("role") not in {"admin", "dosen"}:
-                            raise HTTPException(status_code=403, detail="Staff access required")
-                    except HTTPException:
-                        await websocket.close(code=1008, reason="Session no longer authorized")
-                        return
-                    await websocket.send_text(message["data"])
+            # get_message(timeout=) + ping: `pubsub.listen()` bisa menggantung
+            # selamanya pada socket half-open, menahan pubsub + coroutine di
+            # memori. Ping tiap 30s mendeteksi klien mati dan membebaskannya.
+            while True:
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=30.0
+                )
+                if message is None:
+                    await websocket.send_json({"event": "ping"})
+                    continue
+                try:
+                    payload = await authenticate_access_token(raw_token)
+                    if payload.get("role") not in {"admin", "dosen"}:
+                        raise HTTPException(status_code=403, detail="Staff access required")
+                except HTTPException:
+                    await websocket.close(code=1008, reason="Session no longer authorized")
+                    return
+                await websocket.send_text(message["data"])
         except WebSocketDisconnect:
             _log.info("[WS] client disconnected")
         except Exception as e:
@@ -985,8 +998,7 @@ async def logs_stream_ws(websocket: WebSocket):
                 await pubsub.unsubscribe("dashboard:logs")
             except Exception:
                 pass
-        if redis_client is not None:
             try:
-                await redis_client.aclose()
+                await pubsub.aclose()
             except Exception:
                 pass

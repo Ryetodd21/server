@@ -1,6 +1,6 @@
 import logging
 import re
-from datetime import timezone as _timezone, datetime as _datetime
+from datetime import timezone as _timezone
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
@@ -59,7 +59,24 @@ class AwareDateTime(TypeDecorator):
             value = value.replace(tzinfo=_timezone.utc)
         return value
 
-engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG)
+# SQLite (aiosqlite/StaticPool) menolak pool_size/max_overflow, jadi opsi
+# pool hanya dipasang untuk PostgreSQL. Koneksi remote UpCloud: recycle +
+# pre_ping supaya koneksi stale tidak menumpuk buffer di tiap worker.
+def pool_kwargs(url: str, size: int = 5) -> dict:
+    """Pool options for PostgreSQL only; SQLite (StaticPool) rejects them."""
+    if "sqlite" in url.lower():
+        return {}
+    return {
+        "pool_size": size,
+        "max_overflow": size,
+        "pool_recycle": 1800,
+        "pool_pre_ping": True,
+    }
+
+
+engine = create_async_engine(
+    settings.DATABASE_URL, echo=settings.DEBUG, **pool_kwargs(settings.DATABASE_URL)
+)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 # Sync engine for ML pipeline (sklearn + SQLAlchemy sync)
@@ -73,7 +90,9 @@ def get_sync_engine():
         sync_url = settings.DATABASE_URL.replace("+asyncpg", "").replace("+aiosqlite", "")
         if "sqlite" in sync_url and "+aiosqlite" in settings.DATABASE_URL:
             sync_url = sync_url.replace("sqlite", "sqlite")
-        _sync_engine = create_engine(sync_url, echo=settings.DEBUG)
+        _sync_engine = create_engine(
+            sync_url, echo=settings.DEBUG, **pool_kwargs(sync_url, size=3)
+        )
     return _sync_engine
 
 
@@ -110,6 +129,12 @@ def get_sync_session():
 
     return _ctx
 
+
+async def dispose_engines() -> None:
+    """Close both engine pools (lifespan shutdown / test teardown)."""
+    await engine.dispose()
+    if _sync_engine is not None:
+        _sync_engine.dispose()
 
 class Base(DeclarativeBase):
     pass
