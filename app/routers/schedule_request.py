@@ -16,6 +16,12 @@ from app.routers.auth import get_current_user, get_current_user_id
 
 router = APIRouter(prefix="/schedule-requests", tags=["Schedule Requests"])
 
+# _to_response() reads req.subject / req.lecturer. db.refresh() reloads scalar
+# columns only, so the relations must be named or the helper lazy-loads them
+# outside the greenlet context (MissingGreenlet → HTTP 500 when subject_id or
+# lecturer_id is set; null IDs short-circuit and hide the bug).
+_REQ_RELATIONS = ["subject", "lecturer"]
+
 
 async def require_admin_or_dosen(request: Request) -> dict:
     """Require admin or dosen role."""
@@ -84,7 +90,7 @@ async def create_schedule_request(
     )
     db.add(req)
     await db.commit()
-    await db.refresh(req)
+    await db.refresh(req, _REQ_RELATIONS)
 
     user_result = await db.execute(select(User).where(User.id == user_id))
     user = user_result.scalar_one_or_none()
@@ -248,7 +254,7 @@ async def approve_request(
     req.admin_notes = data.admin_notes
 
     await db.commit()
-    await db.refresh(req)
+    await db.refresh(req, _REQ_RELATIONS)
 
     user_result = await db.execute(select(User).where(User.id == req.requester_id))
     user = user_result.scalar_one_or_none()
@@ -288,7 +294,7 @@ async def reject_request(
     req.admin_notes = data.admin_notes
 
     await db.commit()
-    await db.refresh(req)
+    await db.refresh(req, _REQ_RELATIONS)
 
     user_result = await db.execute(select(User).where(User.id == req.requester_id))
     user = user_result.scalar_one_or_none()

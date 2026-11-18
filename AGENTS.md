@@ -9,7 +9,7 @@ Sumber otorisasi, data akademik, log mahasiswa, model distraksi, laporan, dan ko
 - Python 3.13 di Dockerfile; requirements menyatakan kompatibel 3.14.
 - FastAPI, Uvicorn, Pydantic 2, pydantic-settings.
 - SQLAlchemy 2: AsyncSession untuk HTTP, Session sync untuk ML/background. PostgreSQL (asyncpg/psycopg2), SQLite (aiosqlite) untuk dev.
-- JWT HS256 (python-jose), bcrypt, SlowAPI (`app/limiter.py`).
+- JWT HS256 (PyJWT 2.15.1), bcrypt, SlowAPI (`app/limiter.py`).
 - Redis, RQ 2 (`monitoring` queue), fakeredis untuk dev; paho-mqtt 2.1+.
 - pandas/NumPy/scikit-learn (StandardScaler/PCA/KMeans), httpx, Firebase Admin opsional.
 
@@ -33,6 +33,7 @@ Sumber otorisasi, data akademik, log mahasiswa, model distraksi, laporan, dan ko
 | `app/cache.py`, `app/cache_pubsub.py` | Cache API dan invalidasi antarproses. |
 | `app/services/fcm.py` | FCM; butuh service account. |
 | `scripts/` | `backend_regression_check.py`, `scheduler_slot_check.py`, `ml_pipeline_smoke_test.py`, seed. |
+| `tests/` | Pytest gate CI: startup, `/health`, kontrak tipe token JWT. Env uji di `tests/conftest.py`, `pytest.ini` menambah root ke `pythonpath`. |
 
 ## Autentikasi dan hak akses
 
@@ -79,6 +80,10 @@ Hierarki: **Fakultas → Jurusan → ProgramStudi → MataKuliah → JadwalMataK
 
 **Penting untuk Android:** `schedules.student_id` = `students.id`, sedangkan `student_id` di response `/auth/login` = `users.id`. Android harus mengunci Room dengan `users.id` dari auth, bukan nilai response.
 
+### Relasi wajib eager-load (HTTP 500)
+
+`_to_response()` (`routers/schedule_request.py`) membaca `req.subject.name` / `req.lecturer.name`. `db.refresh()` hanya memuat ulang kolom skalar, jadi relasi harus disebut eksplisit: `db.refresh(req, _REQ_RELATIONS)` (`["subject", "lecturer"]`). Tanpa itu SQLAlchemy melakukan lazy-load di luar greenlet → `MissingGreenlet` → **500**. Bug ini hanya muncul bila `subject_id`/`lecturer_id` terisi; nilai null short-circuit dan menyembunyikannya. Query list/mine/approve/reject sudah memakai `selectinload`; `routers/schedule.py` memakai pola sama untuk `subject`/`lecturer`/`campus`.
+
 ## Pipeline ML dan skor
 
 1. Fitur dari agregasi log harian; sampel lokasi dipakai sebagai agregasi, bukan pengukuran menit.
@@ -117,6 +122,8 @@ Queue bernama `monitoring`. `USE_FAKEREDIS=true` menjalankan enqueue in-process;
 
 Startup FastAPI menjalankan migrasi dan cleanup DB — pilih DB disposable sebelum smoke test. Mode lokal dikelola `../scripts/run-server.sh`; `server/run.sh` meneruskannya.
 
+CI: `.github/workflows/ci.yml` (push/PR) — `ruff check app --select E9,F63,F7,F82`, `pytest -q`, Trivy fs (CRITICAL/HIGH, `ignore-unfixed`), SBOM CycloneDX via `anchore/sbom-action`. Python 3.13 di runner. Style ruff tidak digate (masih ~500 temuan lama).
+
 Pemeriksaan:
 - `python -m scripts.backend_regression_check` — fixture SQLite in-memory, tanpa `.env`/lifespan. Mencakup password, otorisasi HTTP/WS, rollback/ACK batch, signature MQTT, retry scheduler. `MONITORUNG_CHECK_DATABASE_URL` hanya untuk DB disposable bernama `monitorung_regression`.
 - `python -m scripts.scheduler_slot_check`, `python -m scripts.ml_pipeline_smoke_test`.
@@ -138,7 +145,7 @@ Untuk kontrak baru, tambah satu regression check terfokus pada input/otorisasi/d
 VPS `root@213.163.207.199`, `/opt/monitorung`. Compose:
 `docker compose --env-file .env.production -f docker-compose.yml -f compose.vps.yml <cmd>`
 
-Database **Managed PostgreSQL UpCloud 18.7** (`defaultdb`) via private network. `UPCLOUD_DATABASE_URL`/`UPCLOUD_DATABASE_SYNC_URL` di `.env.production`, `PGSSLMODE=require`. URL tanpa parameter SSL agar asyncpg dan helper sync sama-sama jalan. TLS aktif; belum verify-full. Container postgres lokal berhenti, profile `local-db-rollback`; jangan rollback ke data lokal tanpa sinkronisasi balik.
+Database **Managed PostgreSQL UpCloud 18.7** (`defaultdb`) via private network. `UPCLOUD_DATABASE_URL`/`UPCLOUD_DATABASE_SYNC_URL` di `.env.production`, `PGSSLMODE=verify-full` + `PGSSLROOTCERT=/app/upcloud-ca.pem`. URL tanpa parameter SSL agar asyncpg dan helper sync sama-sama jalan (keduanya membaca `PGSSLMODE`/`PGSSLROOTCERT` dari environment). CA UpCloud ada di `/opt/monitorung/upcloud-ca.pem` di VPS dan di-bind-mount read-only ke api/worker/scheduler/subscriber lewat `compose.vps.yml`. Sertifikat server memuat SAN `monitorterop-pphsdagzsaph.db.upclouddatabases.com`, jadi hostname check lolos. Container postgres lokal berhenti, profile `local-db-rollback`; jangan rollback ke data lokal tanpa sinkronisasi balik.
 
 Deploy: build → `docker save | gzip | ssh | docker load` → `up -d --no-deps --wait api worker scheduler subscriber web`. **Tidak ada backup tersisa** (dihapus 2026-11-17); rollback hanya lewat rebuild.
 

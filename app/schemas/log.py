@@ -89,3 +89,48 @@ class SyncStatusResponse(BaseModel):
     # client uses this list to call markSynced(syncedIds) — without it,
     # pending rows stayed PENDING forever (round 17 fix).
     synced_client_ids: list[str] = []
+
+
+# --- Log History Schemas ---
+
+class LogHistoryAppUsage(BaseModel):
+    type: str = "app_usage"
+    student_id: str
+    student_name: str = ""
+    nim: str = ""
+    log_date: str
+    total_screen_time_minutes: int
+    social_media_time_minutes: int
+    game_time_minutes: int
+    other_app_time_minutes: int
+    unlock_count: int
+    used_during_class: bool
+    schedule_id: str | None = None
+    campus_id: str | None = None
+    geofence_status: str | None = None
+    is_synced: bool
+
+
+class LogHistoryLocation(BaseModel):
+    type: str = "location"
+    student_id: str
+    student_name: str = ""
+    nim: str = ""
+    recorded_at: str
+    latitude: float
+    longitude: float
+    campus_id: str | None = None
+    is_on_campus: bool
+    matches_schedule: bool
+    schedule_id: str | None = None
+    is_synced: bool
+
+
+LogHistoryItem = LogHistoryAppUsage | LogHistoryLocation
+
+
+class LogHistoryResponse(BaseModel):
+    items: list[LogHistoryItem]
+    total: int
+    limit: int
+    offset: int

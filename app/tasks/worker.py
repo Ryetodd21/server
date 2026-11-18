@@ -16,6 +16,7 @@ from app.models.cluster_result import ClusterResult
 from app.models.student import Student
 
 settings = get_settings()
+logger = logging.getLogger("monitor")
 
 
 def _make_redis():

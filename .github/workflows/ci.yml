@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend — lint, test, SBOM, scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest ruff
+
+      # Only correctness checks are gated (undefined names, syntax errors).
+      # Style rules are not enforced yet — the codebase has ~500 pre-existing
+      # findings and reformatting it is out of scope for the CI item.
+      - name: Ruff (correctness)
+        run: ruff check app --select E9,F63,F7,F82
+
+      - name: Tests
+        run: pytest -q
+
+      - name: SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0.24.3
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom-backend.cdx.json
+          artifact-name: sbom-backend
+          upload-artifact: true
+
+      - name: Vulnerability scan (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          skip-dirs: venv,.venv
+          exit-code: "1"

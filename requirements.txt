@@ -12,15 +12,11 @@ psycopg2-binary>=2.9.13
 aiosqlite>=0.20.0
 
 # Auth
-python-jose[cryptography]==3.3.0
-# Round 26 (P2) audit: python-jose 3.3.0 has been unmaintained since 2022.
-# Known CVE-2024-33663 (algorithm confusion) is mitigated here because
-# we use HS256 only (no RS/ES key switch), but the project is
-# effectively in maintenance limbo. Plan migration to PyJWT when
-# convenient. The blocked migration points are:
-#   - jose.jwt.encode/decode → jwt.encode/decode (drop-in)
-#   - jose.jwt.get_unverified_header → jwt.get_unverified_header
-#   - jose.ExpiredSignatureError / JWTError → jwt.ExpiredSignatureError / InvalidTokenError
+# Round 32 (P1 CI): python-jose 3.3.0 diganti PyJWT — 2 CVE CRITICAL
+# (CVE-2024-33663, CVE-2026-85394) dan proyeknya tidak dirawat sejak 2022.
+# Hanya 3 titik pakai (encode x2, decode x1) di app/routers/auth.py.
+# `jose.JWTError` → `jwt.InvalidTokenError`; get_unverified_header tidak dipakai.
+PyJWT==2.15.1
 bcrypt==4.0.1
 
 # Redis Queue

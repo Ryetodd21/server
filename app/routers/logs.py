@@ -5,7 +5,7 @@ import math
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, literal_column, and_, String, cast, Date
+from sqlalchemy import select, func, and_, String, cast, Date
 from sqlalchemy.exc import IntegrityError
 from app.timezone import WITA
 from app.database import get_db
@@ -16,7 +16,7 @@ from app.models.user import User
 from app.models.mata_kuliah import MataKuliah
 from app.models.schedule import Schedule
 from app.models.campus import Campus
-from app.schemas.log import BatchLogRequest, SyncStatusResponse
+from app.schemas.log import BatchLogRequest, SyncStatusResponse, LogHistoryResponse, LogHistoryAppUsage, LogHistoryLocation
 from app.routers.auth import get_current_user
 from app.config import get_settings
 from app.limiter import limiter
@@ -624,150 +624,172 @@ async def check_sync_status(
     )
 
 
-@router.get("/history")
+@router.get("/history", response_model=LogHistoryResponse)
 async def get_log_history(
     request: Request,
     db: AsyncSession = Depends(get_db),
     payload: dict = Depends(get_current_user),
     limit: int = Query(default=100, ge=1, le=500, description="Max rows to return (capped at 500)"),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination"),
+    from_date: str | None = Query(default=None, description="Filter from date (YYYY-MM-DD)"),
+    to_date: str | None = Query(default=None, description="Filter to date (YYYY-MM-DD)"),
 ):
-    """
-    Return recent app_logs + location_logs.
-    Admin/dosen: all logs from all students.
-    Mahasiswa: only their own logs.
-    Includes student full_name and nim for display.
-    Used by the web /logs page on mount to populate historical data instead of
-    starting empty (SSE only delivers new events, not buffered history).
-    """
-    from sqlalchemy import select, literal_column, and_
+    """Return recent app_logs + location_logs, newest first.
 
+    Admin/dosen: all students' logs. Mahasiswa: only their own.
+    Used by the web /logs page on mount and by the Android history screen.
+
+    Date filters compare `DATE(log_date)` / `DATE(timestamp)` so they stay
+    portable across SQLite and PostgreSQL. `total` counts every row matching
+    the filters (not just the current page) so callers can paginate.
+    """
     role = payload.get("role", "")
     is_staff = role in ("admin", "dosen")
 
+    from_dt = to_dt = None
+    if from_date:
+        try:
+            from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=422, detail="from_date format must be YYYY-MM-DD")
+    if to_date:
+        try:
+            to_dt = datetime.strptime(to_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=422, detail="to_date format must be YYYY-MM-DD")
+
+    # Student scope: staff see everyone, a mahasiswa sees only their own rows.
     if is_staff:
-        # Admin/dosen: fetch mobile-source logs only (exclude seed data).
-        # One row per (student_id, DATE(log_date)) via window function dedup.
-        student_subq = select(Student.id, Student.full_name, Student.nim).subquery()
-        dedup_subq = (
-            select(
-                AppLog.id,
-                func.row_number()
-                .over(
-                    partition_by=[AppLog.student_id, func.date(AppLog.log_date)],
-                    order_by=[AppLog.log_date.desc(), AppLog.id.desc()],
-                )
-                .label("rn"),
-            )
-            .where(AppLog.source == "mobile")
-            .subquery()
-        )
-        app_res = await db.execute(
-            select(
-                AppLog,
-                literal_column("'app_log'").label("log_type"),
-                student_subq.c.full_name,
-                student_subq.c.nim,
-            )
-            .outerjoin(student_subq, AppLog.student_id == student_subq.c.id)
-            .join(
-                dedup_subq,
-                and_(
-                    dedup_subq.c.id == AppLog.id,
-                    dedup_subq.c.rn == 1,
-                ),
-            )
-            .where(AppLog.source == "mobile")
-            .order_by(AppLog.log_date.desc())
-            .limit(limit)
-        )
-        app_rows = app_res.all()
-
-        loc_res = await db.execute(
-            select(
-                LocationLog,
-                literal_column("'location_log'").label("log_type"),
-                student_subq.c.full_name,
-                student_subq.c.nim,
-            )
-            .outerjoin(student_subq, LocationLog.student_id == student_subq.c.id)
-            .order_by(LocationLog.timestamp.desc())
-            .limit(limit)
-        )
-        loc_rows = loc_res.all()
-    else:
-        # Mahasiswa: only their own logs
-        user_id = payload.get("sub", "")
-        student_res = await db.execute(
-            select(Student.id, Student.full_name, Student.nim).where(Student.user_id == user_id)
-        )
-        student_rows = student_res.all()
-        student_ids = [r[0] for r in student_rows]
+        student_scope = None
+        student_info: dict[str, tuple[str, str]] = {}
+        student_rows = (
+            await db.execute(select(Student.id, Student.full_name, Student.nim))
+        ).all()
         student_info = {r[0]: (r[1], r[2]) for r in student_rows}
+    else:
+        student_rows = (
+            await db.execute(
+                select(Student.id, Student.full_name, Student.nim).where(
+                    Student.user_id == payload.get("sub", "")
+                )
+            )
+        ).all()
+        student_scope = [r[0] for r in student_rows]
+        student_info = {r[0]: (r[1], r[2]) for r in student_rows}
+        if not student_scope:
+            return LogHistoryResponse(items=[], total=0, limit=limit, offset=offset)
 
-        if not student_ids:
-            return []
+    # App logs: one row per (student, day) for mobile rows — same dedup the
+    # dashboard already relies on. `rn = 1` keeps the latest row of the day.
+    app_conds = [AppLog.source == "mobile"]
+    if student_scope is not None:
+        app_conds.append(AppLog.student_id.in_(student_scope))
+    if from_dt is not None:
+        app_conds.append(func.date(AppLog.log_date) >= from_dt)
+    if to_dt is not None:
+        app_conds.append(func.date(AppLog.log_date) <= to_dt)
 
-        app_res = await db.execute(
-            select(AppLog, literal_column("'app_log'").label("log_type"))
-            .where(AppLog.student_id.in_(student_ids))
-            .where(AppLog.source == "mobile")
-            .order_by(AppLog.log_date.desc())
-            .limit(limit)
+    dedup_subq = (
+        select(
+            AppLog.id,
+            func.row_number()
+            .over(
+                partition_by=[AppLog.student_id, func.date(AppLog.log_date)],
+                order_by=[AppLog.log_date.desc(), AppLog.id.desc()],
+            )
+            .label("rn"),
         )
-        app_rows = [(row, lt, *student_info.get(row.student_id, (None, None))) for row, lt in app_res.all()]
-
-        loc_res = await db.execute(
-            select(LocationLog, literal_column("'location_log'").label("log_type"))
-            .where(LocationLog.student_id.in_(student_ids))
-            .order_by(LocationLog.timestamp.desc())
-            .limit(limit)
+        .where(and_(*app_conds))
+        .subquery()
+    )
+    app_base = (
+        select(AppLog)
+        .join(dedup_subq, and_(dedup_subq.c.id == AppLog.id, dedup_subq.c.rn == 1))
+        .where(and_(*app_conds))
+    )
+    app_res = await db.execute(
+        app_base.order_by(AppLog.log_date.desc()).limit(limit).offset(offset)
+    )
+    app_rows = app_res.scalars().all()
+    app_total = (
+        await db.execute(
+            select(func.count()).select_from(dedup_subq).where(dedup_subq.c.rn == 1)
         )
-        loc_rows = [(row, lt, *student_info.get(row.student_id, (None, None))) for row, lt in loc_res.all()]
+    ).scalar_one()
 
-    events = []
-    for row, _log_type, student_name, nim in app_rows:
-        events.append({
-            "type": "app_log",
-            "student_id": row.student_id,
-            "student_name": student_name or "",
-            "nim": nim or "",
-            "log_date": row.log_date.isoformat() if row.log_date else None,
-            "total_screen_time_minutes": row.total_screen_time_minutes,
-            "social_media_time_minutes": row.social_media_time_minutes,
-            "game_time_minutes": row.game_time_minutes,
-            "unlock_count": row.unlock_count,
-            "used_during_class": row.used_during_class,
-            # Geofence attendance verdict (see run_geofence_columns_migration).
-            # Only set when `used_during_class` is true and a campus was resolved.
-            # UI renders the badge based on this string.
-            "campus_id": row.campus_id,
-            "geofence_status": row.geofence_status,
-            # Track provenance: "mobile" = from Android, "seed" = from seed script.
-            # Filtering by source='mobile' above means all rows are mobile here,
-            # but the field is included so the frontend can label the source.
-            "source": row.source,
-        })
-    for row, _log_type, student_name, nim in loc_rows:
-        events.append({
-            "type": "location_log",
-            "student_id": row.student_id,
-            "student_name": student_name or "",
-            "nim": nim or "",
-            "recorded_at": row.timestamp.isoformat() if row.timestamp else None,
-            "is_on_campus": row.is_on_campus,
-            "matches_schedule": row.matches_schedule,
-            "latitude": row.latitude,
-            "longitude": row.longitude,
-        })
+    # Location logs.
+    loc_conds = []
+    if student_scope is not None:
+        loc_conds.append(LocationLog.student_id.in_(student_scope))
+    if from_dt is not None:
+        loc_conds.append(func.date(LocationLog.timestamp) >= from_dt)
+    if to_dt is not None:
+        loc_conds.append(func.date(LocationLog.timestamp) <= to_dt)
+    loc_where = and_(*loc_conds) if loc_conds else None
 
-    # Sort by date descending and trim to limit
-    def sort_key(e):
-        d = e.get("log_date") or e.get("recorded_at") or ""
-        return d
+    loc_stmt = select(LocationLog).order_by(LocationLog.timestamp.desc()).limit(limit).offset(offset)
+    if loc_where is not None:
+        loc_stmt = loc_stmt.where(loc_where)
+    loc_rows = (await db.execute(loc_stmt)).scalars().all()
 
-    events.sort(key=sort_key, reverse=True)
-    return events[:limit]
+    loc_count_stmt = select(func.count(LocationLog.id))
+    if loc_where is not None:
+        loc_count_stmt = loc_count_stmt.where(loc_where)
+    loc_total = (await db.execute(loc_count_stmt)).scalar_one()
 
+    items: list[LogHistoryAppUsage | LogHistoryLocation] = []
+    for row in app_rows:
+        name, nim = student_info.get(row.student_id, ("", ""))
+        items.append(
+            LogHistoryAppUsage(
+                student_id=row.student_id,
+                student_name=name or "",
+                nim=nim or "",
+                log_date=row.log_date.isoformat() if row.log_date else "",
+                total_screen_time_minutes=row.total_screen_time_minutes or 0,
+                social_media_time_minutes=row.social_media_time_minutes or 0,
+                game_time_minutes=row.game_time_minutes or 0,
+                other_app_time_minutes=row.other_app_time_minutes or 0,
+                unlock_count=row.unlock_count or 0,
+                used_during_class=bool(row.used_during_class),
+                schedule_id=row.schedule_id,
+                campus_id=row.campus_id,
+                geofence_status=row.geofence_status,
+                is_synced=bool(row.is_synced),
+            )
+        )
+    for row in loc_rows:
+        name, nim = student_info.get(row.student_id, ("", ""))
+        recorded = row.recorded_at or row.timestamp
+        items.append(
+            LogHistoryLocation(
+                student_id=row.student_id,
+                student_name=name or "",
+                nim=nim or "",
+                recorded_at=recorded.isoformat() if recorded else "",
+                latitude=row.latitude,
+                longitude=row.longitude,
+                campus_id=row.campus_id,
+                is_on_campus=bool(row.is_on_campus),
+                matches_schedule=bool(row.matches_schedule),
+                schedule_id=row.schedule_id,
+                is_synced=bool(row.synced),
+            )
+        )
+
+    # Merge the two sources; each is already newest-first, so a stable sort
+    # on the timestamp key keeps the ordering deterministic.
+    items.sort(
+        key=lambda i: i.log_date if isinstance(i, LogHistoryAppUsage) else i.recorded_at,
+        reverse=True,
+    )
+
+    return LogHistoryResponse(
+        items=items[:limit],
+        total=app_total + loc_total,
+        limit=limit,
+        offset=offset,
+    )
 
 @router.get("/geofence-summary")
 async def geofence_summary(

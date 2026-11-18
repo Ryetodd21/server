@@ -1,9 +1,12 @@
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from sqlalchemy import String, ForeignKey, Boolean, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base, AwareDateTime
+
+if TYPE_CHECKING:
+    from app.models.student import Student
 
 
 def _utc_now() -> datetime:
