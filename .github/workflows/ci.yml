@@ -20,7 +20,13 @@ jobs:
           # Disamakan dengan Dockerfile (ARG PYTHON_VERSION) dan venv dev lokal.
           # Dulu 3.13: inkompatibilitas khusus 3.14 (SQLAlchemy 2.0.35) lolos CI
           # dan hanya muncul di mesin developer.
-          python-version: "3.14.4"
+          #
+          # Pin ke 3.14.10, bukan 3.14.4: `ubuntu-latest` kini Ubuntu 26.04 dan
+          # manifest actions/python-versions hanya menyediakan build 26.04 untuk
+          # 3.14.6+. Dengan 3.14.4 CI gagal:
+          #   "The version '3.14.4' ... was not found for Ubuntu 26.04"
+          # Jangan kembalikan ke 3.14.4 tanpa mem-pin runs-on ke ubuntu-24.04.
+          python-version: "3.14.10"
 
       - name: Install dependencies
         # requirements-dev.txt meng-include requirements.txt, jadi satu

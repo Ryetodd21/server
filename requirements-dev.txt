@@ -10,7 +10,7 @@
 #   pip install -r requirements.txt -r requirements-dev.txt
 #
 # Versi di bawah = versi terbaru di PyPI saat file ini dibuat dan sudah
-# diverifikasi jalan di Python 3.14.4 (28 tes lulus, ruff gate bersih).
+# diverifikasi jalan di Python 3.14.10 (28 tes lulus, ruff gate bersih).
 -r requirements.txt
 
 pytest==9.2.0

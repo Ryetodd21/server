@@ -15,7 +15,7 @@ Android App  →  FastAPI Server  →  Redis Queue  →  PostgreSQL
 
 ## Prasyarat
 
-- Python 3.14.4 (sama dengan `Dockerfile` dan CI)
+- Python 3.14.10 (sama dengan `Dockerfile` dan CI)
 - PostgreSQL 14+
 - Redis 6+
 

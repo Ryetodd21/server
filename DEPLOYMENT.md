@@ -367,7 +367,7 @@ Tunnel (cloudflared/ngrok) handle HTTPS termination — server lokal cukup HTTP.
 ### Prasyarat
 
 Di WSL2 harus terinstall:
-- Python 3.14.4 (disamakan dengan Dockerfile dan CI; SQLAlchemy 2.0.58)
+- Python 3.14.10 (disamakan dengan Dockerfile dan CI; SQLAlchemy 2.0.58)
 - PostgreSQL 14+ (untuk production)
 - Redis 6+ (untuk production)
 - `cloudflared` (jika pakai Cloudflare Tunnel) atau tunnel tool lain

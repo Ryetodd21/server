@@ -3,9 +3,12 @@
 # Build target: production (multi-worker, --proxy-headers)
 # Override command in docker-compose.yml untuk run sebagai worker/scheduler/api.
 
-# Disamakan dengan dev lokal dan CI: Python 3.14.4 + SQLAlchemy 2.0.58.
-# Tag image diverifikasi ada di Docker Hub (library/python:3.14.4-slim).
-ARG PYTHON_VERSION=3.14.4
+# Disamakan dengan dev lokal dan CI: Python 3.14.10 + SQLAlchemy 2.0.58.
+# Tag image diverifikasi ada di Docker Hub (library/python:3.14.10-slim).
+# 3.14.10, bukan 3.14.4: GitHub Actions `ubuntu-latest` sudah Ubuntu 26.04, dan
+# manifest actions/python-versions hanya punya build 26.04 untuk 3.14.6+.
+# Memakai 3.14.4 di CI gagal dengan "version 3.14.4 was not found for Ubuntu 26.04".
+ARG PYTHON_VERSION=3.14.10
 
 FROM python:${PYTHON_VERSION}-slim AS base
 
