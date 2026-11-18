@@ -3,7 +3,9 @@
 # Build target: production (multi-worker, --proxy-headers)
 # Override command in docker-compose.yml untuk run sebagai worker/scheduler/api.
 
-ARG PYTHON_VERSION=3.13
+# Disamakan dengan dev lokal dan CI: Python 3.14.4 + SQLAlchemy 2.0.58.
+# Tag image diverifikasi ada di Docker Hub (library/python:3.14.4-slim).
+ARG PYTHON_VERSION=3.14.4
 
 FROM python:${PYTHON_VERSION}-slim AS base
 

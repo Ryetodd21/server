@@ -189,6 +189,12 @@ async def run_migrations():
         ("model_versions", "kmeans_model_data", "TEXT"),
         ("model_versions", "scaler_model_data", "TEXT"),
         ("model_versions", "feature_columns", "TEXT"),
+        # Holdout evaluation metrics (out-of-sample cluster quality gate).
+        # FLOAT is valid in both PostgreSQL (= double precision) and SQLite.
+        ("model_versions", "holdout_silhouette", "FLOAT"),
+        ("model_versions", "holdout_davies_bouldin", "FLOAT"),
+        ("model_versions", "holdout_calinski_harabasz", "FLOAT"),
+        ("model_versions", "holdout_min_silhouette", "FLOAT"),
         # Round 8: program_studi sits inside a jurusan (department)
         ("program_studi", "jurusan_id", "VARCHAR(36)"),
         # Location logs — new columns from mobile app

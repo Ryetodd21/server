@@ -74,6 +74,10 @@ def _to_response(mv: ModelVersion) -> ModelVersionResponse:
         kmeans_n_clusters=mv.kmeans_n_clusters,
         silhouette_score=mv.silhouette_score,
         inertia=mv.inertia,
+        holdout_silhouette=mv.holdout_silhouette,
+        holdout_davies_bouldin=mv.holdout_davies_bouldin,
+        holdout_calinski_harabasz=mv.holdout_calinski_harabasz,
+        holdout_min_silhouette=mv.holdout_min_silhouette,
         train_size=mv.train_size,
         test_size=mv.test_size,
         cluster_distribution=_parse_json(mv.cluster_distribution, {}),
@@ -274,6 +278,43 @@ async def trigger_training(
         raise HTTPException(status_code=409, detail=str(e))
 
 
+async def _reactivate_previous_model(db: AsyncSession, failed_model_id: str) -> None:
+    """Re-activate the most recent completed model after a failed run.
+
+    Mirrors `_train_model_task_impl`'s failure branch in `app/tasks/worker.py`.
+    `_run_training` deactivates every model up front, so a failure would
+    otherwise leave `is_active=False` on every row and break `/api/reports/*`
+    and `/api/models/results/latest` until the next successful training.
+
+    Best-effort: any error here is logged and swallowed so the caller's
+    original HTTP error is not masked.
+    """
+    try:
+        prev = await db.execute(
+            select(ModelVersion)
+            .where(
+                ModelVersion.status == "completed",
+                ModelVersion.id != failed_model_id,
+            )
+            .order_by(ModelVersion.version_number.desc())
+            .limit(1)
+        )
+        prev_mv = prev.scalar_one_or_none()
+        if prev_mv is not None:
+            await db.execute(
+                update(ModelVersion)
+                .where(ModelVersion.id == prev_mv.id)
+                .values(is_active=True)
+            )
+            await db.commit()
+            logger.warning(
+                "[models/train] re-activated previous model v%s after failure",
+                prev_mv.version_number,
+            )
+    except Exception as inner:
+        logger.warning(f"[models/train] re-activate previous model failed: {inner}")
+
+
 async def _run_training(data: TrainRequest, db: AsyncSession) -> TrainResponse:
     # Get next version number
     last_version_result = await db.execute(
@@ -350,6 +391,10 @@ async def _run_training(data: TrainRequest, db: AsyncSession) -> TrainResponse:
                 kmeans_n_clusters=result["kmeans_n_clusters"],
                 inertia=result["inertia"],
                 silhouette_score=result["silhouette_score"],
+                holdout_silhouette=(result.get("holdout_metrics") or {}).get("silhouette"),
+                holdout_davies_bouldin=(result.get("holdout_metrics") or {}).get("davies_bouldin"),
+                holdout_calinski_harabasz=(result.get("holdout_metrics") or {}).get("calinski_harabasz"),
+                holdout_min_silhouette=result.get("holdout_min_silhouette"),
                 cluster_distribution=json.dumps(result["cluster_distribution"]),
                 cluster_labels=json.dumps(result["cluster_labels"]),
                 pca_model_data=result["pca_data"],
@@ -438,6 +483,15 @@ async def _run_training(data: TrainRequest, db: AsyncSession) -> TrainResponse:
             # Cleanup within cleanup — log and continue; don't mask the
             # original error that will propagate to the caller.
             logger.warning(f"[models/train] cleanup failed: {inner}")
+        # Re-activate the previous completed model. The `update(is_active=False)`
+        # at the top of `_run_training` deactivated EVERY model, and the new MV
+        # is flipped back to is_active=False above — without this, a failed run
+        # leaves zero active models, so `/api/reports/*` and
+        # `/api/models/results/latest` short-circuit until the next successful
+        # training. The holdout gate makes this an *expected* failure mode, not
+        # an exceptional one, so the fallback must be reliable here too (the RQ
+        # worker already does this in `_train_model_task_impl`).
+        await _reactivate_previous_model(db, mv.id)
         # Invalidate active-model caches — training may have toggled
         # is_active even on failure (the new MV was created with is_active=True
         # before the failure branch flipped it back to False).
@@ -465,6 +519,9 @@ async def _run_training(data: TrainRequest, db: AsyncSession) -> TrainResponse:
             await db.commit()
         except Exception as inner:
             logger.warning(f"[models/train] cleanup failed (generic branch): {inner}")
+        # Same fallback as the ValueError branch — a generic failure must not
+        # leave the system with zero active models.
+        await _reactivate_previous_model(db, mv.id)
         cache_invalidate(_CACHE_KEY_MODEL_ID)
         cache_invalidate(_CACHE_KEY_MODEL_LABELS)
         # Round 28: clear all serving cache too.

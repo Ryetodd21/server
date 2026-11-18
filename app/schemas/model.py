@@ -89,6 +89,14 @@ class ModelVersionResponse(BaseModel):
     kmeans_n_clusters: int
     silhouette_score: float | None
     inertia: float | None
+    # Out-of-sample (holdout) cluster quality. `silhouette_score` above is the
+    # training-partition value; these are measured on the held-out test split
+    # that the fit never saw. A model only reaches `status='completed'` when
+    # `holdout_silhouette` passes `holdout_min_silhouette`.
+    holdout_silhouette: float | None = None
+    holdout_davies_bouldin: float | None = None
+    holdout_calinski_harabasz: float | None = None
+    holdout_min_silhouette: float | None = None
     train_size: int | None
     test_size: int | None
     cluster_distribution: dict | None

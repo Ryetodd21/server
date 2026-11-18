@@ -6,9 +6,9 @@ Terakhir dicocokkan: 2026-11-17. Berlaku untuk `/home/terio-op/server`. Baca jug
 
 Sumber otorisasi, data akademik, log mahasiswa, model distraksi, laporan, dan konteks AI. Prefix `/api`; `/` metadata, `/health` pemeriksaan dasar (tidak membuktikan pipeline MQTT/ML).
 
-- Python 3.13 di Dockerfile; requirements menyatakan kompatibel 3.14.
+- Python **3.14.4** di semua lingkungan: Dockerfile (`ARG PYTHON_VERSION`), CI (`.github/workflows/ci.yml`), dan venv dev lokal. `requirements.txt` tidak memaku versi Python; satu pin `sqlalchemy==2.0.58` dipakai bersama (mendukung 3.11–3.15). Selisih versi Python antar-lingkungan **tidak** boleh diatasi dengan pin SQLAlchemy berbeda — itu yang dulu membuat bug khusus 3.14 lolos CI.
 - FastAPI, Uvicorn, Pydantic 2, pydantic-settings.
-- SQLAlchemy 2: AsyncSession untuk HTTP, Session sync untuk ML/background. PostgreSQL (asyncpg/psycopg2), SQLite (aiosqlite) untuk dev.
+- SQLAlchemy 2 (`2.0.58`): AsyncSession untuk HTTP, Session sync untuk ML/background. PostgreSQL (asyncpg/psycopg2), SQLite (aiosqlite) untuk dev. **Jangan turunkan ke < 2.0.44**: 2.0.35 dan sebelumnya memanggil `typing.Union.__getitem__(tuple)` di `sqlalchemy/util/typing.py::make_union_type`, yang gagal di Python 3.14 dengan `TypeError: descriptor '__getitem__' requires a 'typing.Union' object` — setiap model `Mapped[...]` gagal dideklarasikan, jadi seluruh app tidak bisa di-import. Jalur 2.1.x sengaja tidak dipakai (baru ~2 bulan, rilis cepat).
 - JWT HS256 (PyJWT 2.15.1), bcrypt, SlowAPI (`app/limiter.py`).
 - Redis, RQ 2 (`monitoring` queue), fakeredis untuk dev; paho-mqtt 2.1+.
 - pandas/NumPy/scikit-learn (StandardScaler/PCA/KMeans), httpx, Firebase Admin opsional.
@@ -93,6 +93,22 @@ Hierarki: **Fakultas → Jurusan → ProgramStudi → MataKuliah → JadwalMataK
 5. `serving.py` harus memakai urutan fitur, transformasi, label, dan versi yang konsisten dengan trainer. Artefak pickle hanya dari sumber internal.
 6. Hasil di `ClusterResult`; invalidasi cache Redis setelah training/pergantian model.
 7. `_model_cache` di `serving.py` adalah LRU maks 2 entri; `train_pipeline` melepas DataFrame/array sementara + `gc.collect()` sebelum kembali.
+8. **Tanggal efektif wajib identik di kedua jalur**: `coalesce(log_date, timestamp)`. Trainer memakainya di `build_feature_dataframe`; serving memakainya di `_aggregate_student_features_batch_sync` dan `score_all_students_for_date`. Memakai `date(log_date)` saja membuang baris `log_date` NULL (seed legacy, payload MQTT tanpa field) sehingga mahasiswa dinilai dengan vektor fitur berbeda dari yang dipakai melatih. Tes: `test_train_and_serve_aggregate_log_date_null_identically`.
+9. `cluster_distribution` dihitung dari `all_labels` (seluruh dataset), bukan `train_labels` — harus menjumlah ke `dataset_size` agar konsisten dengan `clustering_results`.
+10. `upsert_cluster_result_sync` cabang **update** harus menulis semua kolom hasil (`pca_x/y/z`, `cluster_name`, `distraction_score`, `features`). `pca_z` pernah hilang di cabang update sehingga koordinat 3D beku di nilai tulis pertama. Tes: `tests/test_ml_serving_upsert.py`.
+
+
+### Gate sebelum model boleh `completed`
+
+K-Means tidak punya label ground truth, jadi "akurasi" klasifikasi tidak ada. Yang dipakai adalah indeks internal pada **data uji (holdout)** — partisi yang tidak pernah dilihat `fit`:
+
+- `ML_MIN_DATASET_SIZE` (default 30 baris student-date) — ditolak di `train_pipeline` sebelum fitting. Floor lama hanya `len(X) >= k_n` (3 baris), terlalu rendah untuk silhouette/inertia yang berarti.
+- `ML_MIN_HOLDOUT_SILHOUETTE` (default 0.10, `None` = nonaktif) — `_check_holdout_gate()` menolak training bila silhouette holdout di bawah ambang. Gate **tidak** menggagalkan training saat metrik tak terdefinisi (holdout degenerate/terlalu kecil) — itu "tidak diketahui", bukan "buruk".
+- Metrik disimpan di `model_versions`: `holdout_silhouette`, `holdout_davies_bouldin`, `holdout_calinski_harabasz`, `holdout_min_silhouette`. `silhouette_score` lama tetap = partisi **train**.
+- `train_metrics` dan `holdout_metrics` juga dikembalikan `train_pipeline` untuk perbandingan (gap besar = indikasi overfit meski unsupervised).
+
+Kegagalan gate adalah jalur **normal**, bukan error tak terduga. Karena `_run_training` menonaktifkan semua model di awal, kedua cabang gagal (HTTP `ValueError`/generik dan worker) memanggil fallback re-aktivasi model completed terakhir — tanpa itu `/api/reports/*` dan `/api/models/results/latest` 404 sampai training berikutnya berhasil. Tes: `tests/test_ml_pipeline.py`, `tests/test_ml_training_gate.py`.
+
 
 Rumus skor di `ml/score.py`, terpisah dari assignment KMeans. Default: screen time cap 480 menit bobot 0.35; sosmed+game cap 240 bobot 0.25; unlock cap 10 bobot 0.20; fraksi penggunaan dalam kelas 0.10; penalti kecocokan jadwal <0.5 sebesar 0.10. Hasil dibatasi 1, dibulatkan 3 desimal. Jangan duplikasi rumus di UI.
 
@@ -122,7 +138,11 @@ Queue bernama `monitoring`. `USE_FAKEREDIS=true` menjalankan enqueue in-process;
 
 Startup FastAPI menjalankan migrasi dan cleanup DB — pilih DB disposable sebelum smoke test. Mode lokal dikelola `../scripts/run-server.sh`; `server/run.sh` meneruskannya.
 
-CI: `.github/workflows/ci.yml` (push/PR) — `ruff check app --select E9,F63,F7,F82`, `pytest -q`, Trivy fs (CRITICAL/HIGH, `ignore-unfixed`), SBOM CycloneDX via `anchore/sbom-action`. Python 3.13 di runner. Style ruff tidak digate (masih ~500 temuan lama).
+CI: `.github/workflows/ci.yml` (push/PR) — `ruff check app --select E9,F63,F7,F82`, `pytest -q`, Trivy fs (CRITICAL/HIGH, `ignore-unfixed`), SBOM CycloneDX via `anchore/sbom-action`. Python **3.14.4** di runner, sama dengan Dockerfile dan venv lokal. Style ruff tidak digate (masih ~500 temuan lama).
+
+**Celah yang perlu disadari:** CI, Docker, dan venv dev harus tetap di versi Python yang sama. Sebelum disamakan, CI menguji 3.13 sedangkan dev berjalan di 3.14 — inkompatibilitas khusus 3.14 (SQLAlchemy 2.0.35) **lolos CI sepenuhnya** dan hanya muncul di mesin developer. Jika versi Python dinaikkan lagi, naikkan ketiganya bersamaan (Dockerfile `ARG`, `ci.yml`, dan venv lokal).
+
+Alat lint/test dipisah ke `requirements-dev.txt` (`pytest==9.2.0`, `ruff==0.17.5`, plus `-r requirements.txt`), bukan di `requirements.txt` produksi. CI memasang `pip install -r requirements-dev.txt`; venv lokal yang hanya memasang `requirements.txt` tidak bisa menjalankan `pytest tests/`. Pin versinya disengaja: sebelumnya `pip install pytest ruff` tanpa versi membuat hasil CI tidak reproducible.
 
 Pemeriksaan:
 - `python -m scripts.backend_regression_check` — fixture SQLite in-memory, tanpa `.env`/lifespan. Mencakup password, otorisasi HTTP/WS, rollback/ACK batch, signature MQTT, retry scheduler. `MONITORUNG_CHECK_DATABASE_URL` hanya untuk DB disposable bernama `monitorung_regression`.

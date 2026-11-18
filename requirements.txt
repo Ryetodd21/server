@@ -5,7 +5,15 @@ pydantic==2.13.5
 pydantic-settings==2.7.1
 
 # Database
-sqlalchemy==2.0.35
+# Round 33: 2.0.35 (Sep 2024) tidak bisa di-import di Python 3.14 —
+# `sqlalchemy/util/typing.py::make_union_type` memanggil
+# `typing.Union.__getitem__(tuple)` yang sudah tidak menerima tuple, jadi
+# setiap model Mapped[...] gagal saat deklarasi (TypeError: descriptor
+# '__getitem__' requires a 'typing.Union' object). Diperbaiki di 2.0.44.
+# Pin ke 2.0.58 = patch terakhir jalur 2.0 (58 rilis sejak 2024, dipakai
+# mayoritas unduhan) — bukan 2.1.x yang baru berumur ~2 bulan dengan 8 rilis
+# dalam 2 bulan terakhir. Wheels cp314 tersedia.
+sqlalchemy==2.0.58
 greenlet>=3.0.0  # required by sqlalchemy[asyncio] engine.begin()
 asyncpg>=0.30.0
 psycopg2-binary>=2.9.13

@@ -204,6 +204,10 @@ def _train_model_task_impl() -> dict:
             mv.kmeans_n_clusters = result["kmeans_n_clusters"]
             mv.inertia = result["inertia"]
             mv.silhouette_score = result["silhouette_score"]
+            mv.holdout_silhouette = (result.get("holdout_metrics") or {}).get("silhouette")
+            mv.holdout_davies_bouldin = (result.get("holdout_metrics") or {}).get("davies_bouldin")
+            mv.holdout_calinski_harabasz = (result.get("holdout_metrics") or {}).get("calinski_harabasz")
+            mv.holdout_min_silhouette = result.get("holdout_min_silhouette")
             mv.cluster_distribution = json.dumps(result["cluster_distribution"])
             mv.cluster_labels = json.dumps(result["cluster_labels"])
             # Round 30 audit (P0 #3): was missing scaler_data. Without it,

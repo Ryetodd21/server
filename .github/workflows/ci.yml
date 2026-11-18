@@ -17,13 +17,17 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          # Disamakan dengan Dockerfile (ARG PYTHON_VERSION) dan venv dev lokal.
+          # Dulu 3.13: inkompatibilitas khusus 3.14 (SQLAlchemy 2.0.35) lolos CI
+          # dan hanya muncul di mesin developer.
+          python-version: "3.14.4"
 
       - name: Install dependencies
+        # requirements-dev.txt meng-include requirements.txt, jadi satu
+        # perintah memasang pin produksi + alat lint/test yang juga dipin.
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest ruff
+          pip install -r requirements-dev.txt
 
       # Only correctness checks are gated (undefined names, syntax errors).
       # Style rules are not enforced yet — the codebase has ~500 pre-existing

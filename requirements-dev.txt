@@ -1,0 +1,17 @@
+# Development / CI tooling — TIDAK dipakai di image produksi.
+#
+# Pemisahan ini penting: `requirements.txt` adalah pin produksi yang masuk ke
+# image Docker, sedangkan file ini hanya untuk lint + test. Sebelumnya CI
+# memasang `pip install pytest ruff` tanpa versi, sehingga versi alat uji bisa
+# berubah diam-diam antar-run dan kegagalan CI tidak reproducible. Sekarang
+# dipin sama seperti dependency produksi.
+#
+# Pakai:
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# Versi di bawah = versi terbaru di PyPI saat file ini dibuat dan sudah
+# diverifikasi jalan di Python 3.14.4 (28 tes lulus, ruff gate bersih).
+-r requirements.txt
+
+pytest==9.2.0
+ruff==0.17.5

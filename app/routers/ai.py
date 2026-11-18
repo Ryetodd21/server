@@ -280,6 +280,10 @@ async def _build_cluster_context(db: AsyncSession) -> dict:
             "k": active_model.kmeans_n_clusters,
             "pca": active_model.pca_n_components,
             "sil": round(active_model.silhouette_score, 3) if active_model.silhouette_score else None,
+            "holdout_sil": (
+                round(active_model.holdout_silhouette, 3)
+                if active_model.holdout_silhouette else None
+            ),
             "ds": active_model.dataset_size,
             "trained_at": active_model.completed_at.isoformat() if active_model.completed_at else None,
             "inertia": round(active_model.inertia, 3) if active_model.inertia else None,
@@ -727,6 +731,9 @@ async def get_extended_context(
             "sil": round(mv.silhouette_score, 3) if mv.silhouette_score else None,
             "ds": mv.dataset_size,
             "inertia": round(mv.inertia, 3) if mv.inertia else None,
+            "holdout_sil": (
+                round(mv.holdout_silhouette, 3) if mv.holdout_silhouette else None
+            ),
             "trained_at": mv.completed_at.isoformat() if mv.completed_at else None,
             "is_active": mv.is_active,
         }
@@ -947,6 +954,20 @@ async def get_extended_context(
             "inertia": (
                 round(active_model.inertia, 3)
                 if active_model.inertia else None
+            ),
+            # Out-of-sample metrics — the real quality signal. silhouette_score
+            # above is training-partition only.
+            "holdout_silhouette": (
+                round(active_model.holdout_silhouette, 3)
+                if active_model.holdout_silhouette else None
+            ),
+            "holdout_davies_bouldin": (
+                round(active_model.holdout_davies_bouldin, 3)
+                if active_model.holdout_davies_bouldin else None
+            ),
+            "holdout_calinski_harabasz": (
+                round(active_model.holdout_calinski_harabasz, 3)
+                if active_model.holdout_calinski_harabasz else None
             ),
             "dataset_size": active_model.dataset_size,
             "train_size": active_model.train_size,

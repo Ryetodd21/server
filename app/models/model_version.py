@@ -26,6 +26,15 @@ class ModelVersion(Base):
     kmeans_n_clusters: Mapped[int] = mapped_column(Integer, default=4)
     inertia: Mapped[float] = mapped_column(Float, nullable=True)
     silhouette_score: Mapped[float] = mapped_column(Float, nullable=True)
+    # Holdout (out-of-sample) evaluation metrics. `silhouette_score` above is
+    # the training-partition value; these three are computed on the test split
+    # that the fit calls never saw. A model is only marked `completed` when
+    # `holdout_silhouette` passes `ML_MIN_HOLDOUT_SILHOUETTE`. Nullable because
+    # small/degenerate holdouts cannot produce a defined silhouette.
+    holdout_silhouette: Mapped[float] = mapped_column(Float, nullable=True)
+    holdout_davies_bouldin: Mapped[float] = mapped_column(Float, nullable=True)
+    holdout_calinski_harabasz: Mapped[float] = mapped_column(Float, nullable=True)
+    holdout_min_silhouette: Mapped[float] = mapped_column(Float, nullable=True)
     cluster_distribution: Mapped[str] = mapped_column(Text, nullable=True)  # JSON string
     cluster_labels: Mapped[str] = mapped_column(Text, nullable=True)  # JSON string
     pca_model_data: Mapped[str] = mapped_column(Text, nullable=True)

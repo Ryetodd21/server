@@ -15,7 +15,7 @@ Android App  →  FastAPI Server  →  Redis Queue  →  PostgreSQL
 
 ## Prasyarat
 
-- Python 3.13 (sama dengan `Dockerfile`; 3.14 belum didukung SQLAlchemy 2.0.35)
+- Python 3.14.4 (sama dengan `Dockerfile` dan CI)
 - PostgreSQL 14+
 - Redis 6+
 
@@ -28,6 +28,8 @@ cd server
 python3 -m venv venv
 source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+# Untuk menjalankan tes/lint (pytest + ruff):
+pip install -r requirements-dev.txt
 ```
 
 ### 2. Setup Environment
@@ -126,5 +128,6 @@ server/
 │   └── schedules/           # Cron scheduler
 ├── .env.example
 ├── requirements.txt
+├── requirements-dev.txt     # pytest + ruff (CI & lokal)
 └── README.md
 ```

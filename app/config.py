@@ -83,6 +83,19 @@ class Settings(BaseSettings):
     ML_TEST_SIZE: float = 0.2
     ML_RANDOM_STATE: int = 42
     ML_N_INIT: int = 10
+    # Minimum number of (student, date) rows before training is allowed at all.
+    # The old floor was implicit (`len(X) >= KMEANS_N_CLUSTERS`, i.e. 3 rows),
+    # which let a "model" be fitted on almost nothing — silhouette/inertia on
+    # 3 points are meaningless and the resulting clusters cannot be trusted.
+    # 30 rows ≈ 10 students × 3 days, i.e. ~10 points per cluster for k=3.
+    # Override with ML_MIN_DATASET_SIZE in env once real volume is known.
+    ML_MIN_DATASET_SIZE: int = 30
+    # Holdout (test-set) silhouette gate applied BEFORE a ModelVersion is
+    # marked `completed`. If the test-set silhouette is below this value the
+    # training run fails and the model is never activated — the previous
+    # active model keeps serving. Set to None (or empty env) to disable the
+    # gate while still recording the holdout metrics.
+    ML_MIN_HOLDOUT_SILHOUETTE: float | None = 0.10
     # Distraction level labels — comma-separated string from env
     # (DISTRACTION_LABELS=Rendah,Sedang,Tinggi) overrides this default. The
     # list is indexed by cluster mean rank at training time (lowest mean →

@@ -35,7 +35,7 @@ import logging
 import pickle
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Optional
 
@@ -44,7 +44,6 @@ from sqlalchemy import cast, Float, Integer, case, func as sql_func
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.cluster_result import ClusterResult
@@ -256,10 +255,22 @@ def _aggregate_student_features_batch_sync(
     if not target_dates:
         return {}
     target_dates_set = set(target_dates)
+
+    # Effective log date MUST match the trainer's `build_feature_dataframe`:
+    # `func.coalesce(AppLog.log_date, AppLog.timestamp)`. The previous filter
+    # used bare `date(AppLog.log_date)`, so rows with a NULL `log_date`
+    # (legacy seed rows from `scripts/seed.py`, and MQTT payloads without the
+    # field) were included during training but silently dropped at serving
+    # time — the student was then scored on a different feature vector than
+    # the one the model was fitted on.
+    app_log_day = sql_func.date(
+        sql_func.coalesce(AppLog.log_date, AppLog.timestamp)
+    )
+
     # ── App logs (1 query) ──
     log_rows = (
         db_sync.query(
-            sql_func.date(AppLog.log_date).label("log_date"),
+            app_log_day.label("log_date"),
             sql_func.max(AppLog.total_screen_time_minutes).label("screen_time"),
             sql_func.max(AppLog.social_media_time_minutes).label("sosmed_time"),
             sql_func.max(AppLog.game_time_minutes).label("game_time"),
@@ -277,9 +288,9 @@ def _aggregate_student_features_batch_sync(
         )
         .filter(
             AppLog.student_id == student_id,
-            sql_func.date(AppLog.log_date).in_(target_dates),
+            app_log_day.in_(target_dates),
         )
-        .group_by(sql_func.date(AppLog.log_date))
+        .group_by(app_log_day)
         .all()
     )
 
@@ -458,6 +469,11 @@ def upsert_cluster_result_sync(
         existing.cluster_name = prediction["cluster_name"]
         existing.pca_x = prediction["pca_x"]
         existing.pca_y = prediction["pca_y"]
+        # pca_z was missing from this branch: re-scoring an existing
+        # (student, model, date) row left the 3D scatter coordinate frozen at
+        # the value from the first write, while pca_x/pca_y moved. The insert
+        # branch below always set it, so only the update path drifted.
+        existing.pca_z = prediction["pca_z"]
         existing.distraction_score = prediction["distraction_score"]
         existing.features = json.dumps(prediction["features_used"])
         existing.computed_at = datetime.now(timezone.utc)
@@ -651,7 +667,8 @@ def score_all_students_for_date(target_date: date) -> dict[str, int]:
             return {"scored": 0, "skipped": 0, "errors": 1}
 
         student_rows = db_sync.query(distinct(AppLog.student_id)).filter(
-            sql_func.date(AppLog.log_date) == target_date
+            sql_func.date(sql_func.coalesce(AppLog.log_date, AppLog.timestamp))
+            == target_date
         ).all()
         student_ids = [r[0] for r in student_rows]
 
@@ -682,7 +699,8 @@ def score_all_students_for_date(target_date: date) -> dict[str, int]:
             )
             .filter(
                 AppLog.student_id.in_(student_ids),
-                sql_func.date(AppLog.log_date) == target_date,
+                sql_func.date(sql_func.coalesce(AppLog.log_date, AppLog.timestamp))
+                == target_date,
             )
             .group_by(AppLog.student_id)
             .all()
