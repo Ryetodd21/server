@@ -78,6 +78,10 @@ Hierarki: **Fakultas → Jurusan → ProgramStudi → MataKuliah → JadwalMataK
 
 `mata_kuliah._get_or_create_subject()` menjembatani `mata_kuliah` → `subjects` agar dropdown Android (`GET /api/schedules/directory`) sinkron.
 
+### Approve request jadwal = promosi ke jadwal prodi
+
+`POST /api/schedule-requests/{id}/approve` tidak hanya membuat baris `schedules` pribadi. `_promote_request_to_master()` (`routers/schedule_request.py`) juga membuat/mereuse `mata_kuliah` + `jadwal_mata_kuliah` di prodi mahasiswa lewat `match_program` exact, sehingga baris tampil di section 03 Akademik dan disalin `sync_master_schedules()` ke seluruh mahasiswa prodi. Urutan sumber matkul: `subjects` (bila `subject_id` terisi, dalam scope request) → `subject_name_raw` dengan kode sintetis stabil `REQ-xxxxxxxx`. Kampus: `campus_id` request → kampus mata kuliah prodi → kampus aktif pertama. Bila prodi tidak ketemu, nama kosong, kampus tidak ada, atau waktu legacy tidak valid, promosi dilewati **tanpa menggagalkan approve**; respons approve membawa `published_to_master` (true/false, null di endpoint lain). Baris `schedules` mahasiswa memakai `master_schedule_id()` (UUIDv5) yang sama dengan sync agar tidak dobel; approve kedua untuk slot identik me-reuse baris itu. Tes: `tests/test_schedule_request_promote.py`.
+
 **Penting untuk Android:** `schedules.student_id` = `students.id`, sedangkan `student_id` di response `/auth/login` = `users.id`. Android harus mengunci Room dengan `users.id` dari auth, bukan nilai response.
 
 ### Relasi wajib eager-load (HTTP 500)

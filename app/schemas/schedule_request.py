@@ -65,6 +65,9 @@ class ScheduleRequestResponse(BaseModel):
     subject_name: str | None = None
     lecturer_name: str | None = None
     student_name: str | None = None
+    # Only set on the approve response: whether the slot was published into the
+    # prodi's master schedule (section 03) and is now visible to other students.
+    published_to_master: bool | None = None
 
 
 class ScheduleRequestListResponse(BaseModel):

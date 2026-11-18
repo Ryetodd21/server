@@ -1,18 +1,27 @@
+import hashlib
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
+from app.academic_scope import match_program, normalize_academic_name
 from app.database import get_db
-from app.models.schedule import Schedule
+from app.models.campus import Campus
+from app.models.jadwal_mata_kuliah import JadwalMataKuliah
+from app.models.mata_kuliah import MataKuliah
+from app.models.program_studi import ProgramStudi
+from app.models.schedule import Schedule, Subject
 from app.models.schedule_request import ScheduleRequest
 from app.models.student import Student
 from app.models.user import User
+from app.schemas.jadwal_mata_kuliah import hhmm_to_time
 from app.schemas.schedule_request import (
     ScheduleRequestCreate, ScheduleRequestApproveReject,
     ScheduleRequestResponse, ScheduleRequestListResponse,
 )
 from app.routers.auth import get_current_user, get_current_user_id
+from app.routers.mata_kuliah import _get_or_create_subject
+from app.routers.schedule import master_schedule_id
 
 router = APIRouter(prefix="/schedule-requests", tags=["Schedule Requests"])
 
@@ -32,7 +41,11 @@ async def require_admin_or_dosen(request: Request) -> dict:
     return payload
 
 
-def _to_response(req: ScheduleRequest, student_name: str | None = None) -> ScheduleRequestResponse:
+def _to_response(
+    req: ScheduleRequest,
+    student_name: str | None = None,
+    published_to_master: bool | None = None,
+) -> ScheduleRequestResponse:
     return ScheduleRequestResponse(
         id=req.id,
         requester_id=req.requester_id,
@@ -56,7 +69,168 @@ def _to_response(req: ScheduleRequest, student_name: str | None = None) -> Sched
         subject_name=req.subject.name if req.subject else req.subject_name_raw,
         lecturer_name=req.lecturer.name if req.lecturer else req.lecturer_name_raw,
         student_name=student_name,
+        published_to_master=published_to_master,
     )
+
+
+# ─── Publish approved requests into the prodi master schedule ─────────────────
+
+def _synthetic_course_code(name: str) -> str:
+    """Stable placeholder code for a course that only arrived as free text.
+
+    `mata_kuliah.code` is required and limited to 20 chars; the hash keeps
+    repeated approvals of the same name from creating a second course.
+    """
+    digest = hashlib.sha1(normalize_academic_name(name).encode("utf-8")).hexdigest()
+    return f"REQ-{digest[:8].upper()}"
+
+
+async def _resolve_student_program(db: AsyncSession, student: Student) -> ProgramStudi | None:
+    """Resolve the requesting student's prodi using the exact-match rules.
+
+    Mirrors `sync_master_schedules()`: `students.program_studi` is admin free
+    text and often stale, so the user's own affiliation is the fallback.
+    """
+    candidates = [(student.program_studi or "").strip()]
+    if student.user_id:
+        user_jurusan = (
+            await db.execute(select(User.jurusan).where(User.id == student.user_id))
+        ).scalar_one_or_none()
+        if user_jurusan:
+            candidates.append(user_jurusan.strip())
+
+    programs = (
+        await db.execute(select(ProgramStudi).where(ProgramStudi.is_active.is_(True)))
+    ).scalars().all()
+    return next((p for p in (match_program(programs, c) for c in candidates) if p), None)
+
+
+async def _find_course_in_prodi(
+    db: AsyncSession, prodi_id: str, code: str, name: str
+) -> MataKuliah | None:
+    """Find the prodi's course row by code first, then by normalized name."""
+    courses = (
+        await db.execute(select(MataKuliah).where(MataKuliah.program_studi_id == prodi_id))
+    ).scalars().all()
+    wanted_code = code.strip().upper()
+    wanted_name = normalize_academic_name(name)
+    for course in courses:
+        if wanted_code and (course.code or "").strip().upper() == wanted_code:
+            return course
+    for course in courses:
+        if wanted_name and normalize_academic_name(course.name) == wanted_name:
+            return course
+    return None
+
+
+async def _resolve_course_campus_id(
+    db: AsyncSession, req: ScheduleRequest, prodi_id: str
+) -> str | None:
+    """Campus for a newly created course: request → prodi courses → any campus."""
+    if req.campus_id:
+        campus_id = (
+            await db.execute(select(Campus.id).where(Campus.id == req.campus_id))
+        ).scalar_one_or_none()
+        if campus_id:
+            return campus_id
+    campus_id = (
+        await db.execute(
+            select(MataKuliah.campus_id).where(MataKuliah.program_studi_id == prodi_id).limit(1)
+        )
+    ).scalar_one_or_none()
+    if campus_id:
+        return campus_id
+    return (
+        await db.execute(
+            select(Campus.id).where(Campus.is_active.is_(True)).order_by(Campus.name).limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def _promote_request_to_master(
+    db: AsyncSession, req: ScheduleRequest, student: Student
+) -> JadwalMataKuliah | None:
+    """Publish an approved request into the prodi's master schedule.
+
+    Creating `mata_kuliah` + `jadwal_mata_kuliah` is what makes the request
+    show up in section 03 of the Akademik dashboard: `sync_master_schedules()`
+    copies every master slot to all students of that prodi, so the schedule
+    becomes readable by other students on Android and on the website.
+
+    Returns None (without raising) when the data needed to publish is missing —
+    no prodi match, no course name, no campus. Callers still create the
+    requester's personal `schedule` row in that case.
+    """
+    if not req.day_of_week or not req.start_time or not req.end_time:
+        return None
+
+    prodi = await _resolve_student_program(db, student)
+    if prodi is None:
+        return None
+
+    subject = None
+    if req.subject_id:
+        subject = (
+            await db.execute(select(Subject).where(Subject.id == req.subject_id))
+        ).scalar_one_or_none()
+
+    name = ((subject.name if subject else None) or req.subject_name_raw or "").strip()
+    if not name:
+        return None
+    code = ((subject.code if subject else None) or "").strip().upper() or _synthetic_course_code(name)
+
+    course = await _find_course_in_prodi(db, prodi.id, code, name)
+    if course is None:
+        campus_id = await _resolve_course_campus_id(db, req, prodi.id)
+        if not campus_id:
+            return None
+        course = MataKuliah(
+            code=code,
+            name=name,
+            sks=2,
+            semester=student.semester or 1,
+            program_studi_id=prodi.id,
+            campus_id=campus_id,
+            description="Dibuat otomatis dari request jadwal mahasiswa.",
+            is_active=True,
+        )
+        db.add(course)
+        await db.flush()
+        # Mirror into `subjects` so the Android schedule directory and the
+        # `Subject.code == MataKuliah.code` join in sync_master_schedules work.
+        await _get_or_create_subject(db, code, name)
+    elif not course.is_active:
+        course.is_active = True
+
+    try:
+        start, end = hhmm_to_time(req.start_time), hhmm_to_time(req.end_time)
+    except ValueError:
+        # Legacy rows can hold malformed times; skip publishing, keep approval.
+        return None
+    slot = (
+        await db.execute(
+            select(JadwalMataKuliah).where(
+                JadwalMataKuliah.mata_kuliah_id == course.id,
+                JadwalMataKuliah.day_of_week == req.day_of_week,
+                JadwalMataKuliah.start_time == start,
+                JadwalMataKuliah.end_time == end,
+            )
+        )
+    ).scalar_one_or_none()
+    if slot is None:
+        slot = JadwalMataKuliah(
+            mata_kuliah_id=course.id,
+            day_of_week=req.day_of_week,
+            start_time=start,
+            end_time=end,
+            room=(req.room or "").strip(),
+            is_active=True,
+        )
+        db.add(slot)
+        await db.flush()
+    elif not slot.is_active:
+        slot.is_active = True
+    return slot
 
 
 # ─── User endpoints ────────────────────────────────────────────────────────────
@@ -196,6 +370,11 @@ async def approve_request(
 ):
     """Admin/Dosen menyetujui request — jadwal dibuat untuk mahasiswa.
 
+    Besides the requester's personal `schedules` row, the slot is published
+    into the prodi master schedule (`mata_kuliah` + `jadwal_mata_kuliah`) so
+    it shows in section 03 of the Akademik dashboard and reaches every
+    student of that prodi via `sync_master_schedules()`.
+
     Row-locks the ScheduleRequest via SELECT ... FOR UPDATE so two concurrent
     approve calls can't both read status='pending' and create duplicate
     Schedule rows. On SQLite (single-writer) the lock is a no-op but the
@@ -222,6 +401,12 @@ async def approve_request(
     if not req.student_id:
         raise HTTPException(status_code=400, detail="Request tidak memiliki student_id, tidak bisa disetujui")
 
+    student = (
+        await db.execute(select(Student).where(Student.id == req.student_id))
+    ).scalar_one_or_none()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student profile not found")
+
     # Wave 2 #1: reject approval with NULL time fields instead of silently
     # fabricating 08:00/10:00 — that would create Schedule rows the requester
     # never asked for. Both fields are nullable in the model (legacy data,
@@ -232,21 +417,59 @@ async def approve_request(
             detail="Request tidak memiliki start_time atau end_time, tidak bisa disetujui",
         )
 
-    # Create the schedule for the student
-    schedule = Schedule(
-        student_id=req.student_id,
-        day_of_week=req.day_of_week or 1,
-        start_time=req.start_time,
-        end_time=req.end_time,
-        room=req.room,
-        campus_id=req.campus_id,
-        subject_id=req.subject_id,
-        lecturer_id=req.lecturer_id,
-        subject_name_raw=req.subject_name_raw,
-        lecturer_name_raw=req.lecturer_name_raw,
-        is_active=True,
-    )
-    db.add(schedule)
+    # Publish into the prodi master schedule first so the slot also appears in
+    # section 03 and reaches every student of that prodi via
+    # sync_master_schedules(). None = data for publishing is incomplete; the
+    # requester still gets a personal row below (previous behaviour).
+    slot = await _promote_request_to_master(db, req, student)
+
+    # Create the schedule for the student. When the request was promoted, the
+    # row uses the same UUIDv5 id sync_master_schedules() would generate, so
+    # the student does not end up with a duplicate personal + master row.
+    schedule_id = None
+    if slot is not None:
+        try:
+            schedule_id = master_schedule_id(req.student_id, slot.id)
+        except ValueError:
+            # Legacy non-UUID student ids keep the plain personal row.
+            slot = None
+
+    schedule = None
+    if schedule_id:
+        # A second request for the same slot reuses the managed row instead of
+        # colliding on the primary key.
+        schedule = (
+            await db.execute(select(Schedule).where(Schedule.id == schedule_id))
+        ).scalar_one_or_none()
+
+    if schedule is None:
+        schedule = Schedule(
+            student_id=req.student_id,
+            day_of_week=req.day_of_week or 1,
+            start_time=req.start_time,
+            end_time=req.end_time,
+            room=req.room,
+            campus_id=req.campus_id,
+            subject_id=req.subject_id,
+            lecturer_id=req.lecturer_id,
+            subject_name_raw=req.subject_name_raw,
+            lecturer_name_raw=req.lecturer_name_raw,
+            is_active=True,
+        )
+        if schedule_id:
+            schedule.id = schedule_id
+        db.add(schedule)
+    else:
+        schedule.is_active = True
+        schedule.day_of_week = req.day_of_week or 1
+        schedule.start_time = req.start_time
+        schedule.end_time = req.end_time
+        schedule.room = req.room
+        schedule.campus_id = req.campus_id
+        schedule.subject_id = req.subject_id
+        schedule.lecturer_id = req.lecturer_id
+        schedule.subject_name_raw = req.subject_name_raw
+        schedule.lecturer_name_raw = req.lecturer_name_raw
 
     req.status = "approved"
     req.processed_by = admin_user.get("sub")
@@ -258,7 +481,11 @@ async def approve_request(
 
     user_result = await db.execute(select(User).where(User.id == req.requester_id))
     user = user_result.scalar_one_or_none()
-    return _to_response(req, student_name=user.full_name if user else None)
+    return _to_response(
+        req,
+        student_name=user.full_name if user else None,
+        published_to_master=slot is not None,
+    )
 
 
 @router.post("/{request_id}/reject", response_model=ScheduleRequestResponse)
